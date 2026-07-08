@@ -1,16 +1,14 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>six_dof_arm</name>
-  <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="aravindsuresh16@todo.todo">aravindsuresh16</maintainer>
-  <license>TODO: License declaration</license>
+  <name>ur5e_isaac_control</name>
+  <version>0.0.1</version>
+  <description>Joint control scripts for a UR5e arm simulated in Isaac Sim over ROS2</description>
+  <maintainer email="aravind162000@gmail.com">aravindsuresh16</maintainer>
+  <license>Apache-2.0</license>
 
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
-  <depend>trajectory_msgs</depend>
-  <depend>control_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
