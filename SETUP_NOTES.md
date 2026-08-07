@@ -117,6 +117,43 @@ We also tried a Fast-DDS **Discovery Server** approach first
 profile — it's a legitimate, more standard approach, but didn't resolve the
 issue for us. Left unused/removed in favor of the XML profile.
 
+### (Fallback) Scope the Windows env var to Isaac Sim only
+
+**What / where it's set:** the Windows `setx FASTRTPS_DEFAULT_PROFILES_FILE`
+above writes to `HKCU\Environment` — it is **user-level** (only the current
+Windows user, not machine-wide or other users) and **Fast-DDS-specific**
+(nothing outside eProsima Fast-DDS reads it). It is **not destructive** and is
+fully reversible; a missing/malformed profile only makes Fast-DDS log a parse
+warning and fall back to defaults, never crash.
+
+**The catch:** it is global *to that user's Fast-DDS apps*, not just to Isaac
+Sim. **Every** Fast-DDS/ROS2 program that Windows user launches inherits the
+loopback-only, multicast-disabled profile. On this machine that notably
+includes **MATLAB (2024b) ROS Toolbox**, which uses its own bundled Fast-DDS
+for ROS 2 and picks up the same env var. Symptom to watch for: ROS 2 from
+MATLAB on Windows can only see `127.0.0.1` / can't discover nodes on the LAN —
+that's this env var, not a bug.
+
+**Fallback if the global `setx` interferes with other Windows DDS/ROS2 work
+(e.g. MATLAB):** remove the permanent user-wide variable and instead set it
+only for the Isaac Sim launch, via a wrapper `.bat`:
+
+```cmd
+:: Remove the permanent user-wide variable (restart Fast-DDS apps afterwards —
+:: env vars are read once at process start)
+reg delete "HKCU\Environment" /v FASTRTPS_DEFAULT_PROFILES_FILE /f
+
+:: isaac-sim-loopback.bat — confines the loopback profile to Isaac Sim only
+@echo off
+set "FASTRTPS_DEFAULT_PROFILES_FILE=C:\Users\aravi\.ros\fastdds_unicast_profile.xml"
+call "F:\Softwares\IsaacSim-6.0.1\isaac-sim.bat" %*
+```
+
+Launch Isaac Sim through `isaac-sim-loopback.bat` instead of `isaac-sim.bat`.
+This keeps the loopback profile scoped to Isaac Sim and leaves MATLAB and any
+other Windows ROS2 apps on normal (multicast/LAN) discovery. The WSL2 side is
+unaffected — its `~/.bashrc` export is already isolated to that shell.
+
 ## Isaac Sim side: Action Graph
 
 Built manually via `Create -> Visual Scripting -> Action Graph`, wiring
@@ -189,8 +226,9 @@ Play fresh**, to avoid retriggering this.
 
 ## ROS2 package: `ur5e_isaac_control`
 
-Located at `src/ur5e_isaac_control/`. One node,
-`joint_command_publisher`, which:
+Located at `src/ur5e_isaac_control/`.
+
+### Node: `joint_command_publisher`
 
 - Subscribes to `/joint_states` to get the arm's current position before
   moving (avoids a jump from a stale default).
@@ -217,6 +255,29 @@ ros2 run ur5e_isaac_control joint_command_publisher --pick-place
 Note: the joints have real position-drive gains (stiffness/damping), so
 Isaac Sim's PD controller **holds the last commanded position** on its own —
 there's no need to publish continuously to keep the arm in place.
+
+### Node: `joint_controller_gui` (interactive, for learning)
+
+A Tk slider panel — one slider per UR5e joint — for manually driving the arm
+and learning its joint ordering, limits, and directions before scripting
+motions. Works in WSL2 via WSLg (`DISPLAY=:0`; needs `python3-tk`, already
+installed).
+
+- Subscribes to `/joint_states` and **snaps the sliders to the arm's real
+  pose on startup** (and via the **Sync to current** button), so enabling
+  publish never yanks the arm from a stale value.
+- Streams the live slider pose as `sensor_msgs/JointState` to
+  `/joint_command` at 30 Hz while **Publish** is checked — drag a slider and
+  the arm follows in the viewport.
+- Sliders span the UR5e's full +/- 2*pi range; each shows a live radians/degrees
+  readout. **Home** button sends the default home pose.
+- Status line shows publish on/off and the live `/joint_command` subscriber
+  count (`connected` once Isaac Sim's ROS2 Subscribe Joint State node matches).
+
+```bash
+# Isaac Sim must be playing first
+ros2 run ur5e_isaac_control joint_controller_gui
+```
 
 ## Everyday restart checklist
 
