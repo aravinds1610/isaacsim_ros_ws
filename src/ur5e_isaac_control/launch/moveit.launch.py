@@ -94,6 +94,20 @@ def generate_launch_description():
     rviz_env = dict(os.environ)
     rviz_env.pop('FASTRTPS_DEFAULT_PROFILES_FILE', None)
 
+    # When this launch file runs from a shell that inherited VSCode's Snap
+    # environment, GTK_PATH/LOCPATH/XDG_DATA_DIRS/etc. point inside
+    # /snap/code/.../usr, which drags in that snap's bundled libpthread.so.0
+    # ahead of the system one. rviz2 (Qt, dynamically loading GTK/GDK theme
+    # and locale plugins) then dies at startup with a GLIBC_PRIVATE symbol
+    # lookup error. Strip the snap-injected GUI vars just for this process --
+    # every other node here is headless and unaffected.
+    for var in ('GTK_PATH', 'GTK_EXE_PREFIX', 'GDK_PIXBUF_MODULEDIR',
+                'GDK_PIXBUF_MODULE_FILE', 'GIO_MODULE_DIR',
+                'GIO_LAUNCHED_DESKTOP_FILE', 'GIO_LAUNCHED_DESKTOP_FILE_PID',
+                'GSETTINGS_SCHEMA_DIR', 'GTK_IM_MODULE_FILE', 'LOCPATH',
+                'XDG_DATA_DIRS', 'XDG_DATA_HOME', 'XDG_CONFIG_DIRS'):
+        rviz_env.pop(var, None)
+
     rviz = Node(
         package='rviz2',
         executable='rviz2',
