@@ -2,7 +2,7 @@
 """Bring up MoveIt2 (move_group + RViz) for the Isaac Sim UR5e.
 
 Replaces ur_moveit_config's own ur_moveit.launch.py, which can't be used here
-for two reasons (see docs/MOVEIT_PROJECT_PLAN.md):
+for two reasons (see docs/EXPLAINED.md §3):
 
 1. It launches ur_robot_driver's ``wait_for_robot_description`` and gates
    move_group/RViz behind that node's exit. ur_robot_driver isn't installed —
@@ -83,16 +83,7 @@ def generate_launch_description():
         ],
     )
 
-    # RViz never talks to Isaac Sim directly -- only to robot_state_publisher
-    # and move_group, both purely local WSL2 hops -- so it doesn't need the
-    # unicast-loopback DDS profile the other nodes use to reach Windows.
-    # That profile has shown itself unreliable for local request/reply
-    # traffic (services, action results), which is exactly what RViz's
-    # Motion Planning panel depends on. Strip the env var just for this
-    # process so it falls back to normal Fast-DDS defaults (multicast +
-    # shared memory), while every other node's config is untouched.
     rviz_env = dict(os.environ)
-    rviz_env.pop('FASTRTPS_DEFAULT_PROFILES_FILE', None)
 
     # When this launch file runs from a shell that inherited VSCode's Snap
     # environment, GTK_PATH/LOCPATH/XDG_DATA_DIRS/etc. point inside
