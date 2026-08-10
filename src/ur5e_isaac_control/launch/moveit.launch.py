@@ -52,15 +52,32 @@ def generate_launch_description():
         LaunchConfiguration('use_sim_time'), value_type=bool)
 
     pkg_share = get_package_share_directory('ur5e_isaac_control')
-    urdf_path = os.path.join(pkg_share, 'urdf', 'ur5e.urdf')
 
-    # The SRDF's <robot name="$(arg name)"> must match the URDF's robot name,
-    # which is "ur5e" — MoveIt rejects the pair otherwise.
+    # M1b: the composed description (arm + Robotiq 2F-85 + grasp_tcp), not the
+    # bare arm. ur5e.urdf is still the source of the arm half; this xacro
+    # includes it verbatim.
+    urdf_path = os.path.join(pkg_share, 'urdf', 'ur5e_gripper.urdf.xacro')
+
+    # SRDF comes from our Setup Assistant output, NOT ur_moveit_config's.
+    # The stock UR SRDF tips the ur_manipulator chain at tool0 (the bare flange)
+    # and has no disable_collisions entry for the gripper, so with gripper
+    # geometry present every state would read as self-colliding and nothing
+    # would plan. Ours tips at grasp_tcp and carries the auto-generated
+    # collision matrix.
+    #
+    # Both files declare <robot name="ur5e">; MoveIt rejects the pair if the
+    # names differ, which is why ur5e_gripper.urdf.xacro keeps that name.
+    #
+    # It is a COPY of src/ur5e_gripper_moveit_config/config/ur5e.srdf rather
+    # than a reference, because that package exec_depends on this one and
+    # depending back would be a cycle. See that file's header for how to
+    # refresh it.
+    srdf_path = os.path.join(pkg_share, 'config', 'ur5e_gripper.srdf')
+
     moveit_config = (
         MoveItConfigsBuilder(robot_name='ur5e', package_name='ur_moveit_config')
         .robot_description(file_path=urdf_path)
-        .robot_description_semantic(
-            Path('srdf') / 'ur.srdf.xacro', {'name': 'ur5e'})
+        .robot_description_semantic(file_path=srdf_path)
         .robot_description_kinematics(Path('config') / 'kinematics.yaml')
         .joint_limits(Path('config') / 'joint_limits.yaml')
         .trajectory_execution(Path('config') / 'moveit_controllers.yaml')
@@ -98,6 +115,16 @@ def generate_launch_description():
             moveit_config.to_dict(),
             {'publish_robot_description_semantic': True},
             {'use_sim_time': use_sim_time},
+            # Before executing, MoveIt checks the trajectory's first waypoint
+            # against the robot's actual pose and refuses if they differ by
+            # more than this. The 0.01 rad default is tight for a physics sim:
+            # the arm settles slightly under gravity after each move, and at
+            # velocity scaling 0.5 the residual tracking error was measured at
+            # 0.0095 rad -- right on the limit, so Execute aborted
+            # intermittently with "start point deviates from current robot
+            # state". 0.05 rad (2.9 deg) still catches a genuinely stale plan
+            # while tolerating normal settling.
+            {'trajectory_execution.allowed_start_tolerance': 0.05},
         ],
     )
 

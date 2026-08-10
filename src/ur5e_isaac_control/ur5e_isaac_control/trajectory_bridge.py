@@ -20,7 +20,13 @@ the current elapsed time and publish that pose. This preserves MoveIt's
 time parameterisation (its velocity/acceleration limits) rather than replacing
 it with a fixed-duration ramp.
 
-Precautions carried over from joint_command_publisher.py (see SETUP_NOTES.md):
+Elapsed time is measured on the NODE clock, which follows Isaac Sim's /clock
+when the node runs with use_sim_time:=true (moveit.launch.py sets this). The
+wall clock is used only as a stall guard. See _now() for why this matters:
+sampling on wall clock makes playback race a sim running below real time, and
+the resulting tracking error scales with commanded speed.
+
+Precautions carried over from joint_command_publisher.py (see EXPLAINED.md):
 publishing before Isaac Sim's subscriber has matched silently drops messages,
 so we wait for a subscriber before streaming.
 """
@@ -114,6 +120,39 @@ class TrajectoryBridge(Node):
     def _actual_positions(self, joint_names):
         return [self.current_positions.get(n, 0.0) for n in joint_names]
 
+    # -- time ----------------------------------------------------------------
+    def _now(self):
+        """Seconds from the NODE clock, not the wall clock.
+
+        With use_sim_time:=true this follows Isaac Sim's /clock, so trajectory
+        playback runs on the same timeline the simulation does. Sampling on
+        wall clock instead (the original implementation) makes the bridge race
+        ahead whenever the sim runs below real time: it publishes waypoints the
+        articulation has not reached yet, and tracking error grows with speed.
+        Measured at velocity scaling 0.5, worst joint error was 0.0095 rad
+        against move_group's allowed_start_tolerance of 0.01 -- close enough
+        that the NEXT Execute would intermittently abort with "start point
+        deviates from current robot state".
+
+        Falls back to system time automatically when use_sim_time is false.
+        """
+        return self.get_clock().now().nanoseconds * 1e-9
+
+    def _sleep_clock(self, seconds, wall_timeout=None):
+        """Wait `seconds` of NODE-clock time.
+
+        Polls rather than blocking, because /clock only advances while the sim
+        is playing. wall_timeout bounds the wait in real seconds so that pausing
+        Isaac Sim mid-trajectory cannot hang the action server forever.
+        """
+        t0, w0 = self._now(), time.monotonic()
+        limit = wall_timeout if wall_timeout is not None else max(5.0, seconds * 10)
+        while rclpy.ok() and (self._now() - t0) < seconds:
+            if time.monotonic() - w0 > limit:
+                return False
+            time.sleep(0.005)
+        return True
+
     # -- action plumbing -----------------------------------------------------
     def _on_goal(self, goal_request):
         n = len(goal_request.trajectory.points)
@@ -143,9 +182,23 @@ class TrajectoryBridge(Node):
         feedback = FollowJointTrajectory.Feedback()
         feedback.joint_names = joint_names
 
-        start = time.monotonic()
+        # Sampled against the node clock (sim time when use_sim_time is set);
+        # the wall clock is kept only as a stall guard, so that pausing the sim
+        # mid-trajectory ends the goal instead of spinning forever.
+        start = self._now()
+        wall_start = time.monotonic()
+        wall_limit = max(10.0, duration * 10.0)
+
         while rclpy.ok():
-            elapsed = time.monotonic() - start
+            elapsed = self._now() - start
+
+            if time.monotonic() - wall_start > wall_limit:
+                self.get_logger().error(
+                    f'Aborting: {wall_limit:.0f}s of wall time elapsed but only '
+                    f'{elapsed:.2f}s of clock time (of {duration:.2f}s needed). '
+                    'Is Isaac Sim paused, or /clock not publishing?')
+                goal_handle.abort()
+                return result
 
             if goal_handle.is_cancel_requested:
                 goal_handle.canceled()
@@ -171,8 +224,10 @@ class TrajectoryBridge(Node):
             time.sleep(period)
 
         # Let the PD drives settle onto the final commanded pose before judging.
+        # Waited on the node clock too: if the sim runs below real time, 0.2 s
+        # of wall clock is less than 0.2 s of settling as the robot sees it.
         final = list(points[-1].positions)
-        time.sleep(0.2)
+        self._sleep_clock(0.2)
         actual = self._actual_positions(joint_names)
         worst = max((abs(a - f) for a, f in zip(actual, final)), default=0.0)
 

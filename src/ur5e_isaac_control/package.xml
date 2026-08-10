@@ -18,6 +18,12 @@
   <exec_depend>moveit_planners_ompl</exec_depend>
   <exec_depend>ur_moveit_config</exec_depend>
   <exec_depend>ur_description</exec_depend>
+  <!-- M1b: gripper meshes referenced by urdf/ur5e_gripper.urdf.xacro.
+       NOTE deliberately no dependency on ur5e_gripper_moveit_config: that
+       package exec_depends on THIS one (its config references our URDF), so
+       depending on it back is a cycle colcon refuses to order. Its SRDF is
+       copied into config/ instead - see config/ur5e_gripper.srdf. -->
+  <exec_depend>robotiq_description</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
   <depend>control_msgs</depend>

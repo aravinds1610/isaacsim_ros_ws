@@ -1,0 +1,206 @@
+<?xml version="1.0"?>
+<!--
+  UR5e + Robotiq 2F-85, for MoveIt (M1b).
+
+  Composition, not regeneration: ur5e.urdf is included VERBATIM because that
+  file is already verified to match the Isaac Sim articulation (RViz renders the
+  arm in the same pose the sim reports). Rebuilding it from ur_description's
+  xacro risks silently different joint origins and would throw that away.
+
+  The robot name MUST stay "ur5e" - the SRDF matches on it, and MoveIt rejects
+  a URDF/SRDF pair whose names differ.
+
+  == The gripper is ONE fixed link, deliberately ==
+
+  Isaac Sim publishes 6 gripper joints on /joint_states, but under a different
+  naming scheme than robotiq_description uses:
+
+      Isaac:  finger_joint, left_inner_finger_joint, right_outer_knuckle_joint, ...
+      vendor: robotiq_85_left_knuckle_joint, robotiq_85_left_finger_tip_joint, ...
+
+  If this URDF declared movable joints under vendor names, none would ever
+  receive a value, MoveIt's CurrentStateMonitor would never consider the robot
+  state complete, and every Execute would abort with "couldn't receive full
+  current joint state within 1s" - the exact failure that blocked M2 until the
+  /clock fix. So all nine gripper meshes are merged into a single fixed link,
+  matching PLAN.md's "geometry-only" decision.
+
+  Geometry is placed at the OPEN pose (knuckle theta = 0), which is the wider
+  envelope, so collision checking errs conservatively.
+
+  == Where the numbers come from ==
+
+  Mount rotation: read off the Isaac Sim stage, from the physics joint
+  /World/ur5e/joints/robot_gripper_joint (wrist_3_link -> gripper base),
+  localRot0 = rpy(-pi/2, -pi/2, 0), localPos0 = 0. Composed with Rz(-pi/2)
+  because the Isaac asset's gripper frame and robotiq_description's frame differ
+  by 90 deg about the approach axis - vendor +X corresponds to Isaac -Y,
+  verified across three separate features. Omitting that correction would rotate
+  the gripper 90 deg about its approach axis and close the fingers the wrong way.
+
+  Note tool0 and wrist_3_link are the SAME frame here: wrist_3->flange and
+  flange->tool0 both have zero translation and their rotations cancel exactly.
+  Attaching to tool0 is therefore identical to attaching to wrist_3_link, and
+  reads better.
+
+  Mesh placements: forward kinematics of the vendor chain at theta = 0.
+  grasp_tcp: forward kinematics at theta = 0.8 (the knuckle joint's upper limit,
+  i.e. CLOSED) - the point where the finger pads meet is where a grasped object
+  actually sits, which is what a pose goal should mean. Cross-check: the same FK
+  gives a stroke of 84.8 mm against the 2F-85's published 85 mm.
+
+  CAVEAT: grasp_tcp is the finger-tip LINK ORIGIN, not the pad contact surface.
+  Expect to trim it by a few mm after checking against the sim.
+
+  Usage:
+      xacro ur5e_gripper.urdf.xacro > ur5e_gripper.urdf
+-->
+<robot name="ur5e" xmlns:xacro="http://wiki.ros.org/xacro">
+
+  <!-- The arm, exactly as verified against Isaac Sim. -->
+  <xacro:include filename="$(find ur5e_isaac_control)/urdf/ur5e.urdf" />
+
+  <!-- ==================== gripper geometry ==================== -->
+  <!--
+    Link frame is the vendor's robotiq_85_base_link frame: +Z is the approach
+    direction, +X is the finger open/close axis. Every mesh below is offset by
+    its link's FK position at theta = 0.
+  -->
+  <link name="robotiq_85_base_link">
+
+    <!-- body -->
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/robotiq_base.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/robotiq_base.stl" /></geometry>
+    </collision>
+
+    <!-- outer knuckles -->
+    <visual>
+      <origin xyz="0.030601 0 0.054905" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/left_knuckle.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.030601 0 0.054905" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/left_knuckle.stl" /></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.030601 0 0.054905" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/right_knuckle.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.030601 0 0.054905" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/right_knuckle.stl" /></geometry>
+    </collision>
+
+    <!-- outer fingers -->
+    <visual>
+      <origin xyz="0.062127 0 0.051141" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/left_finger.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.062127 0 0.051141" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/left_finger.stl" /></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.062127 0 0.051141" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/right_finger.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.062127 0 0.051141" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/right_finger.stl" /></geometry>
+    </collision>
+
+    <!-- inner knuckles -->
+    <visual>
+      <origin xyz="0.0127 0 0.06142" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/left_inner_knuckle.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.0127 0 0.06142" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/left_inner_knuckle.stl" /></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.0127 0 0.06142" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/right_inner_knuckle.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.0127 0 0.06142" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/right_inner_knuckle.stl" /></geometry>
+    </collision>
+
+    <!-- finger tips (the pads) -->
+    <visual>
+      <origin xyz="0.067759 0 0.098326" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/left_finger_tip.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="0.067759 0 0.098326" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/left_finger_tip.stl" /></geometry>
+    </collision>
+    <visual>
+      <origin xyz="-0.067759 0 0.098326" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/visual/right_finger_tip.dae" /></geometry>
+    </visual>
+    <collision>
+      <origin xyz="-0.067759 0 0.098326" rpy="0 0 0" />
+      <geometry><mesh filename="package://robotiq_description/meshes/collision/right_finger_tip.stl" /></geometry>
+    </collision>
+
+    <!--
+      Lumped inertial: the vendor's per-link masses summed (~0.9 kg) with a
+      coarse diagonal inertia. MoveIt does not use this for planning and Isaac
+      Sim runs its own physics on its own articulation, so this exists only to
+      keep URDF consumers that require an <inertial> happy. Do NOT treat these
+      numbers as a dynamics model.
+    -->
+    <inertial>
+      <origin xyz="0 0 0.05" rpy="0 0 0" />
+      <mass value="0.9" />
+      <inertia ixx="1.0e-3" ixy="0.0" ixz="0.0" iyy="1.0e-3" iyz="0.0" izz="1.0e-3" />
+    </inertial>
+  </link>
+
+  <!--
+    Identity. tool0 is the ROS-Industrial standard tool frame with +Z pointing
+    out of the flange, and robotiq_85_base_link has +Z as its approach axis, so
+    the two already agree.
+
+    An earlier version derived this from the Isaac Sim physics joint
+    (/World/ur5e/joints/robot_gripper_joint, localRot0 = rpy(-pi/2,-pi/2,0)) and
+    got rpy="1.5707963 0 -3.1415927", which rendered the gripper 90 deg off.
+    That transform is expressed in ISAAC'S wrist_3_link frame, which is NOT the
+    same frame as this URDF's wrist_3_link - the USD link frames carry their own
+    convention from import. Do not reuse USD link-frame rotations here without
+    first establishing that the two frames agree; the position data on those
+    joints is still trustworthy, the orientations are not.
+
+    If the fingers close about the wrong axis (but the gripper does point out of
+    the flange correctly), the fix is a rotation about Z only:
+    rpy="0 0 1.5707963".
+  -->
+  <joint name="tool0-robotiq_85_base_link" type="fixed">
+    <parent link="tool0" />
+    <child link="robotiq_85_base_link" />
+    <origin xyz="0 0 0" rpy="0 0 0" />
+  </joint>
+
+  <!-- ==================== grasp frame ==================== -->
+  <!--
+    The point where the finger pads meet when closed. This is the link to give
+    MoveIt as the planning-group tip / end effector, so that a pose goal means
+    "put the GRASP POINT here" rather than "put the bare flange here".
+    Also the real measured value for kinematics.py's tcp_z_offset.
+  -->
+  <link name="grasp_tcp" />
+
+  <joint name="robotiq_85_base_link-grasp_tcp" type="fixed">
+    <parent link="robotiq_85_base_link" />
+    <child link="grasp_tcp" />
+    <origin xyz="0 0 0.11181" rpy="0 0 0" />
+  </joint>
+
+</robot>
