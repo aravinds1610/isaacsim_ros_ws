@@ -30,6 +30,7 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from launch_ros.substitutions import FindPackageShare
 from moveit_configs_utils import MoveItConfigsBuilder
 
@@ -37,6 +38,18 @@ from moveit_configs_utils import MoveItConfigsBuilder
 def generate_launch_description():
     launch_rviz = LaunchConfiguration('launch_rviz')
     launch_bridge = LaunchConfiguration('launch_bridge')
+
+    # Isaac Sim stamps /joint_states with simulation time (seconds since Play),
+    # not wall clock. Without this, move_group compares a sim-time stamp against
+    # its own wall-clock now(), sees a ~1.7e9 s gap, and refuses to execute:
+    # "Failed to validate trajectory: couldn't receive full current joint state
+    # within 1s". Planning tolerates the mismatch (it falls back to last-known
+    # joint values); trajectory execution does not. Requires the Action Graph to
+    # publish /clock via ROS2 Publish Clock <- Isaac Read Simulation Time.
+    # Declared as a launch arg (not hardcoded) so the stack can still be run
+    # against a wall-clock source without editing this file.
+    use_sim_time = ParameterValue(
+        LaunchConfiguration('use_sim_time'), value_type=bool)
 
     pkg_share = get_package_share_directory('ur5e_isaac_control')
     urdf_path = os.path.join(pkg_share, 'urdf', 'ur5e.urdf')
@@ -61,7 +74,10 @@ def generate_launch_description():
         package='robot_state_publisher',
         executable='robot_state_publisher',
         output='screen',
-        parameters=[moveit_config.robot_description],
+        parameters=[
+            moveit_config.robot_description,
+            {'use_sim_time': use_sim_time},
+        ],
     )
 
     # Gives MoveIt the FollowJointTrajectory action server it expects, backed by
@@ -70,6 +86,7 @@ def generate_launch_description():
         package='ur5e_isaac_control',
         executable='trajectory_bridge',
         output='screen',
+        parameters=[{'use_sim_time': use_sim_time}],
         condition=IfCondition(launch_bridge),
     )
 
@@ -80,6 +97,7 @@ def generate_launch_description():
         parameters=[
             moveit_config.to_dict(),
             {'publish_robot_description_semantic': True},
+            {'use_sim_time': use_sim_time},
         ],
     )
 
@@ -113,6 +131,7 @@ def generate_launch_description():
             moveit_config.robot_description_kinematics,
             moveit_config.planning_pipelines,
             moveit_config.joint_limits,
+            {'use_sim_time': use_sim_time},
         ],
         env=rviz_env,
     )
@@ -125,6 +144,11 @@ def generate_launch_description():
             'launch_bridge', default_value='true',
             description='Launch the FollowJointTrajectory -> /joint_command '
                         'bridge that lets MoveIt execute onto Isaac Sim.'),
+        DeclareLaunchArgument(
+            'use_sim_time', default_value='true',
+            description='Take time from Isaac Sim\'s /clock instead of the '
+                        'wall clock. Required for trajectory execution; the '
+                        'Action Graph must publish /clock.'),
         robot_state_publisher,
         trajectory_bridge,
         move_group,

@@ -13,10 +13,11 @@ package `ur5e_isaac_control` (ament_python).
 > Fast-DDS unicast-loopback profile to work around — and that profile in turn broke MoveIt's
 > service/action traffic (planning fine, but RViz's plan-result fetch hung forever). Moving both
 > sides onto one native Ubuntu install removes the host boundary and the workaround entirely; DDS
-> discovery is expected to just work. If `ros2 topic list` or MoveIt's plan/execute behave oddly, it
-> is a *new* problem, not a recurrence of the DDS bug — check `~/.bashrc` has no leftover
-> `FASTRTPS_DEFAULT_PROFILES_FILE` and that `launch/moveit.launch.py`'s `rviz_env` var-stripping
-> (a WSL2-era leftover, now a harmless no-op) isn't masking something before assuming otherwise.
+> discovery just works — **confirmed 2026-08-10**: `/joint_states`, `/joint_command`, `/clock`, and
+> MoveIt's full service/action traffic (plan *and* execute) all work with zero DDS configuration.
+> `~/.bashrc` has no `FASTRTPS_DEFAULT_PROFILES_FILE`, and the `rviz_env` var-stripping that worked
+> around the old profile has been deleted from `launch/moveit.launch.py`. If `ros2 topic list` or
+> MoveIt behave oddly, it is a *new* problem, not a recurrence of the DDS bug.
 
 ## How I'd like you to work with me
 
@@ -79,8 +80,9 @@ each milestone.
 | `kinematics.py` (ikpy FK/IK) | ✅ built & validated — 200-pose IK round-trip, 0.0000 mm error |
 | `apriltag_pose.py` (36h11 detection + solvePnP) | ✅ built & validated — 50-pose test, 0.0002 mm error |
 | Gripper (2F-85) ROS2 wiring — **M0** | ✅ commandable (`finger_joint`: 0.0 open → ~0.6–0.8 closed) |
-| MoveIt bring-up (`moveit.launch.py`) — **M1** | ✅ built, planning previously verified (under the old WSL2 setup — re-verify natively) |
-| `trajectory_bridge` (FollowJointTrajectory → `/joint_command`) — **M2** | ✅ built, interpolation unit-tested; **live execution never verified end-to-end** |
+| MoveIt bring-up (`moveit.launch.py`) — **M1** | ✅ built & **verified natively 2026-08-10** — RViz Plan succeeds (5–25 ms typical) |
+| Sim-time alignment (`/clock` + `use_sim_time`) | ✅ built & verified 2026-08-10 — prerequisite for M2, see Known issues |
+| `trajectory_bridge` (FollowJointTrajectory → `/joint_command`) — **M2** | ✅ built & **verified live 2026-08-10** — 49-point trajectory executed onto the Isaac Sim arm, `SUCCEEDED`, worst joint error 0.0010 rad |
 | URDF gripper geometry + `grasp_tcp` frame — **M1b** | ⬜ not started |
 | Isaac Sim scene: camera + tagged cube + bin — perception scene setup | ⬜ not started |
 | Perception node (subscribe `/rgb`, publish object pose in base frame) | ⬜ not started |
@@ -89,20 +91,29 @@ each milestone.
 | Dynamic intercept (`conveyor_kinematics`, predict-and-intercept) — **M5** | ⬜ not started |
 | Closed-loop tracking via `moveit_servo` (stretch) — **M6** | ⬜ not started |
 
-**Immediate next step:** re-run the live MoveIt test (see EXPLAINED.md §7) now that Isaac Sim and
-ROS2 share one OS — Plan *and* Execute should both work without any DDS workaround. This
-re-verifies M1+M2 under the current environment before starting M1b/M3.
+**Immediate next step:** **M1b** — extend the URDF with gripper geometry + a `grasp_tcp` frame.
+M1 and M2 are now verified live on native Ubuntu (2026-08-10), so the planning→execution chain is
+proven end-to-end and the remaining blockers are all about *what* we plan to, not *whether*
+execution works. M1b unblocks meaningful grasp poses; the perception scene setup can proceed in
+parallel since it touches only the Isaac Sim stage.
 
 ## Milestones
 
 **M0 — Gripper ROS2 wiring.** ✅ Done. The 2F-85 is controllable via `/joint_command`'s
 `finger_joint`.
 
-**M1 — MoveIt bring-up.** ✅ Built. Custom launch file (`moveit.launch.py`) runs
-`robot_state_publisher` with our URDF, parameterizing `move_group` from `ur_moveit_config`'s SRDF/
-kinematics/OMPL/joint-limits YAML — `ur_moveit_config`'s own launch file can't be used as-is (see
-EXPLAINED.md §3). Proof target: RViz Motion Planning panel, drag the marker, Plan succeeds, ghost
-arm animates.
+**M1 — MoveIt bring-up.** ✅ **Done and verified 2026-08-10.** Custom launch file
+(`moveit.launch.py`) runs `robot_state_publisher` with our URDF, parameterizing `move_group` from
+`ur_moveit_config`'s SRDF/kinematics/OMPL/joint-limits YAML — `ur_moveit_config`'s own launch file
+can't be used as-is (see EXPLAINED.md §3). Proof achieved: RViz Motion Planning panel, goal set,
+Plan succeeds, ghost arm animates. Planning group is `ur_manipulator` (`base_link` → `tool0`);
+the SRDF also ships named joint-space goals `home`, `up`, `test_configuration`, which are the
+fastest way to get a guaranteed-valid goal when debugging.
+
+> Gotcha worth knowing: a *large* interactive-marker drag often fails with OMPL burning its full
+> 5 s budget then `FAILURE` — the pose is unreachable, so there is no goal for the planner to grow
+> toward. Small drags plan in milliseconds. When planning fails, first re-test with a named
+> joint-space goal (`home`) to tell "goal was bad" apart from "the stack is broken".
 
 **M1b — Extend the URDF with gripper geometry + `grasp_tcp` frame.** The official SRDF has no
 gripper group — MoveIt currently plans to `tool0` (the bare flange), not the fingertips, and can't
@@ -110,11 +121,17 @@ see the gripper for collision checking. Add the 2F-85 as fixed collision geometr
 `grasp_tcp` fixed frame at the finger tips. Also lets `kinematics.py`'s `tcp_z_offset` argument
 finally get a real measured value.
 
-**M2 — The FollowJointTrajectory bridge.** ✅ Built (`trajectory_bridge.py`). Advertises
-`/scaled_joint_trajectory_controller/follow_joint_trajectory` (the exact name
-`ur_moveit_config`'s `moveit_controllers.yaml` expects), consumes MoveIt's `JointTrajectory`, and
-streams it to `/joint_command` at 60 Hz by sampling against elapsed wall-clock time. Proof target:
-Execute in RViz moves the real Isaac Sim arm — **this is the one thing not yet confirmed.**
+**M2 — The FollowJointTrajectory bridge.** ✅ **Done and verified live 2026-08-10**
+(`trajectory_bridge.py`). Advertises `/scaled_joint_trajectory_controller/follow_joint_trajectory`
+(the exact name `ur_moveit_config`'s `moveit_controllers.yaml` expects), consumes MoveIt's
+`JointTrajectory`, and streams it to `/joint_command` at 60 Hz by sampling against elapsed
+wall-clock time. Proof achieved: Execute in RViz moved the real Isaac Sim arm —
+`Accepted trajectory with 49 points` → `Trajectory complete in 4.74s (worst joint error
+0.0010 rad)` → `Execution completed: SUCCEEDED`.
+
+> This only started working once `/clock` + `use_sim_time` were in place. Before that, MoveIt
+> aborted at `Validating trajectory with allowed_start_tolerance 0.01` and the bridge was never
+> contacted at all — see Known open issues.
 
 **M3 — Planning scene collision objects.** Register the conveyor rails, belt surface, and table as
 collision geometry so plans route around them. Source the measurements from
@@ -163,21 +180,36 @@ M1 ──┬── M1b ──┐
 M0 ──┴─────────┘
 ```
 
-M0, M1, M2 are already built. Next up: re-verify M1+M2 live on native Ubuntu, then M1b and the
-perception scene setup, then M3 onward.
+M0, M1, M2 are built **and verified live** (2026-08-10). Next up: M1b and the perception scene
+setup (independent of each other), then M3 onward.
 
 ## Known open issues
 
-- **Sim-time vs. wall-clock.** Isaac Sim stamps `/joint_states` with simulation time (seconds
-  since Play); `move_group`'s `current_state_monitor` expects wall-clock and can log "didn't
-  receive robot state within 1.0s" against a huge apparent gap. Soft failure — planning still works
-  off the last known joint values — but not yet fixed. Likely fix: publish `/clock` from the
-  Action Graph and set `use_sim_time: true` on all nodes. Not yet attempted.
-- **`moveit.launch.py`'s `rviz_env` FASTRTPS-stripping block is vestigial** now that no unicast DDS
-  profile is set anywhere — harmless no-op, but worth deleting during the next MoveIt-launch-file
-  edit so it doesn't read as active behavior. The snap/GTK env-stripping block in the same file
-  (works around VSCode's bundled GTK/libpthread conflicting with rviz2) is unrelated and still
-  needed on Ubuntu.
+- ~~**Sim-time vs. wall-clock.**~~ ✅ **RESOLVED 2026-08-10.** The Action Graph now publishes
+  `/clock` (`ROS2 Publish Clock` ← `Isaac Read Simulation Time.simulationTime`, on the same
+  `OnPlaybackTick`), and `moveit.launch.py` sets `use_sim_time: true` on all four nodes via a
+  declared launch arg. **The severity in the old note was wrong and worth remembering:** the
+  mismatch was a *soft* failure for planning (falls back to last-known joint values — verified:
+  `/get_planning_scene` returned the correct live pose despite the warning) but a **hard blocker
+  for execution**. `trajectory_execution_manager` calls `waitForCurrentState()` to validate the
+  trajectory's start against `allowed_start_tolerance` (0.01 rad), that wait timed out, and every
+  Execute aborted with `Failed to validate trajectory: couldn't receive full current joint state
+  within 1s` — the bridge was never contacted. That is why M2 could never be verified.
+- ~~**`rviz_env` FASTRTPS-stripping block is vestigial.**~~ ✅ **RESOLVED 2026-08-10** — deleted.
+  The snap/GTK env-stripping block in the same file (works around VSCode's bundled GTK/libpthread
+  conflicting with rviz2) is unrelated and still needed on Ubuntu.
+- **Isaac Sim Stop/Play resets sim time to 0** (`Isaac Read Simulation Time.resetOnStop` defaults
+  to `True`). ROS nodes that already saw t=1657 then see time jump backwards, which breaks them.
+  **Operating rule: if you Stop and re-Play Isaac Sim, restart the ROS launch too.** Alternative if
+  this becomes annoying: set `resetOnStop = False` so sim time increases monotonically across
+  Stop/Play.
+- **`trajectory_bridge` samples with `time.monotonic()`, not the ROS clock** (`trajectory_bridge.py`
+  ~line 146). Only its message header stamp uses `get_clock().now()`, so `use_sim_time` does *not*
+  affect playback rate. Currently harmless — Isaac Sim runs at ~real-time on this machine, and the
+  verified run tracked to 0.0010 rad — but if the sim drops below real-time (heavier scene once the
+  camera + M3 collision objects load), the bridge will play trajectories faster than the sim can
+  follow and the arm will lag or miss its goal tolerance. Fix when it bites: sample from
+  `self.get_clock().now()` so playback follows sim time.
 - **Gripper as planning group vs. geometry-only:** decided — geometry-only, with gripper open/close
   driven directly over `/joint_command`, not through `move_group`. Two mimic-jointed fingers don't
   need motion planning.
