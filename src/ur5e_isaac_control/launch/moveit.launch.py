@@ -173,7 +173,7 @@ def generate_launch_description():
                         'bridge that lets MoveIt execute onto Isaac Sim.'),
         DeclareLaunchArgument(
             'use_sim_time', default_value='true',
-            description='Take time from Isaac Sim\'s /clock instead of the '
+            description="Take time from Isaac Sim's /clock instead of the "
                         'wall clock. Required for trajectory execution; the '
                         'Action Graph must publish /clock.'),
         robot_state_publisher,

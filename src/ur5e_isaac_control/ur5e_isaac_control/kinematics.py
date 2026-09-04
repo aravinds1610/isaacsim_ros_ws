@@ -15,8 +15,8 @@ import os
 import tempfile
 import xml.etree.ElementTree as ET
 
-import numpy as np
 from ikpy.chain import Chain
+import numpy as np
 
 UR5E_JOINT_NAMES = [
     'shoulder_pan_joint',
@@ -70,7 +70,9 @@ class UR5eKinematics:
     """FK/IK for the UR5e arm, operating on 6-vectors in UR5E_JOINT_NAMES order."""
 
     def __init__(self, urdf_path=None, tcp_z_offset=0.0):
-        """tcp_z_offset: metres from tool0 to the grasp point along tool0 +Z
+        """Load the chain, optionally tipped at a grasp point past tool0.
+
+        tcp_z_offset: metres from tool0 to the grasp point along tool0 +Z
         (e.g. the Robotiq 2F-85 finger length). 0.0 == solve for tool0 itself.
         """
         urdf_path = urdf_path or _default_urdf_path()

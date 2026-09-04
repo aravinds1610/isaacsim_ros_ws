@@ -30,11 +30,10 @@ Precautions carried over from joint_command_publisher.py (see EXPLAINED.md):
 publishing before Isaac Sim's subscriber has matched silently drops messages,
 so we wait for a subscriber before streaming.
 """
-import math
 import time
 
-import rclpy
 from control_msgs.action import FollowJointTrajectory
+import rclpy
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor

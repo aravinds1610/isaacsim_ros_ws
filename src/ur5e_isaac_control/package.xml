@@ -10,7 +10,28 @@
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
 
+  <!-- Message packages imported by the nodes. Keep this list in step with the
+       imports: anything imported but undeclared only works by luck, because
+       some other package happened to pull it into /opt/ros. -->
+  <depend>control_msgs</depend>          <!-- trajectory_bridge: FollowJointTrajectory -->
+  <depend>geometry_msgs</depend>         <!-- cube_pose_publisher, pick_orchestrator -->
+  <depend>moveit_msgs</depend>           <!-- pick_orchestrator: MoveGroup action -->
+  <depend>shape_msgs</depend>            <!-- pick_orchestrator: SolidPrimitive -->
+  <depend>std_srvs</depend>              <!-- pick_orchestrator: Trigger -->
+  <depend>tf2_ros</depend>               <!-- cube_pose_publisher: StaticTransformBroadcaster -->
+  <depend>trajectory_msgs</depend>       <!-- carried inside FollowJointTrajectory goals -->
+  <depend>visualization_msgs</depend>    <!-- cube_pose_publisher: /cube_marker -->
+
+  <!-- Third-party python. NOTE ikpy (kinematics.py) is deliberately absent:
+       it has no rosdep key, so declaring it would break `rosdep install`.
+       Install it with pip - see docs/ISSUES.md. -->
+  <depend>python3-numpy</depend>
+  <depend>python3-opencv</depend>        <!-- apriltag_pose: cv2 -->
+
   <!-- MoveIt2 bring-up (launch/moveit.launch.py) -->
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
   <exec_depend>moveit_configs_utils</exec_depend>
   <exec_depend>moveit_ros_move_group</exec_depend>
   <exec_depend>moveit_ros_visualization</exec_depend>
@@ -26,8 +47,6 @@
   <exec_depend>robotiq_description</exec_depend>
   <exec_depend>robot_state_publisher</exec_depend>
   <exec_depend>rviz2</exec_depend>
-  <depend>control_msgs</depend>
-  <depend>trajectory_msgs</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
