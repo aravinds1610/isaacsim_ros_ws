@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """AprilTag detection + 6-DOF pose estimation using OpenCV (zero extra deps).
 
-OpenCV 4.12's ``cv2.aruco`` ships the AprilTag families, so no apriltag_ros /
-pupil-apriltags needed. ``estimatePoseSingleMarkers`` was removed in 4.7+, so we
-recover pose with ``cv2.solvePnP`` on the four detected tag corners against the
-tag's known metric corner geometry.
+``cv2.aruco`` ships the AprilTag families, so no apriltag_ros / pupil-apriltags
+needed. ``estimatePoseSingleMarkers`` was removed in 4.7+, so we recover pose
+with ``cv2.solvePnP`` on the four detected tag corners against the tag's known
+metric corner geometry.
+
+Works on OpenCV 4.6 (Ubuntu 24.04 / ROS 2 Jazzy) and 4.7+; see
+``_HAS_ARUCO_DETECTOR``. Verified against 4.6.0 on 2026-08-11 -- before that the
+detection path had never been run here and segfaulted on the 4.7-only API.
 
 Pose convention (matches the old estimatePoseSingleMarkers): the returned 4x4 is
 ``T_cam_tag`` — the tag frame expressed in the camera optical frame (OpenCV
@@ -17,24 +21,35 @@ import numpy as np
 # 36h11 is the standard, most robust AprilTag family.
 DEFAULT_FAMILY = 'DICT_APRILTAG_36h11'
 
+# OpenCV reorganised aruco in 4.7: the ArucoDetector class and the
+# DetectorParameters() constructor replaced the free detectMarkers() function
+# and DetectorParameters_create(). Ubuntu 24.04 / ROS 2 Jazzy ship 4.6, so both
+# paths are supported -- on 4.6 the new names either do not exist or segfault.
+_HAS_ARUCO_DETECTOR = hasattr(cv2.aruco, 'ArucoDetector')
+
 
 class AprilTagDetector:
     def __init__(self, tag_size_m, family=DEFAULT_FAMILY):
         """tag_size_m: physical side length of the black tag square, in metres."""
         self.tag_size = float(tag_size_m)
-        dictionary = cv2.aruco.getPredefinedDictionary(getattr(cv2.aruco, family))
-        params = cv2.aruco.DetectorParameters()
+        self.dictionary = cv2.aruco.getPredefinedDictionary(
+            getattr(cv2.aruco, family))
+        if _HAS_ARUCO_DETECTOR:
+            self.params = cv2.aruco.DetectorParameters()
+        else:
+            self.params = cv2.aruco.DetectorParameters_create()
         # Sub-pixel corner refinement -> markedly better pose accuracy.
-        params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
-        self.detector = cv2.aruco.ArucoDetector(dictionary, params)
+        self.params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        self.detector = (cv2.aruco.ArucoDetector(self.dictionary, self.params)
+                         if _HAS_ARUCO_DETECTOR else None)
 
         # Tag corners in the tag frame, ordered to match aruco's output:
         # top-left, top-right, bottom-right, bottom-left. X right, Y up, Z out.
         h = self.tag_size / 2.0
         self.obj_points = np.array([
-            [-h,  h, 0.0],
-            [ h,  h, 0.0],
-            [ h, -h, 0.0],
+            [-h, h, 0.0],
+            [h, h, 0.0],
+            [h, -h, 0.0],
             [-h, -h, 0.0],
         ], dtype=np.float32)
 
@@ -50,7 +65,11 @@ class AprilTagDetector:
         if dist_coeffs is None:
             dist_coeffs = np.zeros(5, dtype=np.float32)
 
-        corners, ids, _ = self.detector.detectMarkers(gray)
+        if self.detector is not None:
+            corners, ids, _ = self.detector.detectMarkers(gray)
+        else:
+            corners, ids, _ = cv2.aruco.detectMarkers(
+                gray, self.dictionary, parameters=self.params)
         results = []
         if ids is None:
             return results
@@ -90,7 +109,7 @@ class AprilTagDetector:
 
 
 def camera_matrix_from_info(width, height, fx, fy, cx, cy):
-    """Build a 3x3 K. (cx, cy default to image centre if None.)"""
+    """Build the 3x3 camera matrix K, defaulting cx/cy to the image centre."""
     cx = width / 2.0 if cx is None else cx
     cy = height / 2.0 if cy is None else cy
     return np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float64)

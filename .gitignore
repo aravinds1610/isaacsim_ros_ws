@@ -7,3 +7,4 @@ __pycache__/
 # Diagnostic dumps written by scripts/isaac_*.py (regenerate on demand)
 gripper_measure.txt
 joints_dump.txt
+scene_measure.txt

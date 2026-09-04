@@ -443,10 +443,9 @@ Validated: 200 random reachable configurations, round-trip `IK(FK(q)) → q'`, m
 
 ### `apriltag_pose.py`
 
-Detects 36h11 AprilTags with `cv2.aruco.ArucoDetector` and recovers 6-DOF pose with
-`cv2.solvePnP` (`SOLVEPNP_IPPE_SQUARE`, optimal for planar squares — `estimatePoseSingleMarkers`
-was removed in OpenCV 4.7+, so pose is computed from known metric corner geometry, the current
-standard method).
+Detects 36h11 AprilTags with `cv2.aruco` and recovers 6-DOF pose with `cv2.solvePnP`
+(`SOLVEPNP_IPPE_SQUARE`, optimal for planar squares — `estimatePoseSingleMarkers` was removed in
+OpenCV 4.7+, so pose is computed from known metric corner geometry, the current standard method).
 
 | Method | Description |
 |---|---|
@@ -454,11 +453,53 @@ standard method).
 | `pose_from_corners(pts, K, dist)` | 4 tag corners → `(T_cam_tag, rvec, tvec)`; decoupled for testing |
 | `draw_detections(...)` | Debug overlay: tag outline, axes, id |
 
-`T_cam_tag` expresses the tag frame in the camera optical frame (OpenCV convention). Validated over
-50 known ground-truth poses: max position error 0.0002 mm, max orientation error 0.0007°.
+`T_cam_tag` expresses the tag frame in the camera optical frame (OpenCV convention).
 
-Tags generated: 36h11, ids 0–3, 1040×1040 px with a 15% white quiet-zone border (required for
-detection); the inner 800 px black square is the metric `tag_size`.
+**Works on OpenCV 4.6 and 4.7+.** OpenCV reorganised aruco in 4.7 — `ArucoDetector` and
+`DetectorParameters()` replaced the free `detectMarkers()` and `DetectorParameters_create()`. This
+file originally used only the 4.7 API; Ubuntu 24.04 / ROS 2 Jazzy ship **4.6.0**, where the new
+class does not exist and the new-style constructor **segfaults**. Fixed 2026-08-11 with a
+`_HAS_ARUCO_DETECTOR` branch.
+
+**Correction to an earlier claim.** This file was previously described here and in PLAN.md as
+"validated — 50 poses, 0.0002 mm error". That validation exercised only `pose_from_corners` (the
+`solvePnP` maths, which works fine on 4.6). The **detection** path had never run on this machine —
+it crashed the first time it was called. Detection is now verified live (2026-08-11): tag id 0 off
+the Isaac Sim camera at 56.8 px, lateral position accurate to **0.05 mm**, range 2.0% long. See
+§11.
+
+Tags generated: 36h11, ids 0–3, 1040×1040 px with a white quiet-zone border (required for
+detection); the **inner 800 px black square is the metric `tag_size`** — ratio 800/1040 = 10/13 =
+0.769. Getting this wrong is a pure scale error on every distance the detector reports.
+
+### `cube_pose_publisher`
+
+The perception node. Turns `/rgb` + `/camera_info` into the cube's pose in coordinates MoveIt can
+plan to.
+
+```bash
+ros2 run ur5e_isaac_control cube_pose_publisher --ros-args -p use_sim_time:=true
+```
+
+| Publishes | |
+|---|---|
+| `/cube_pose` | `geometry_msgs/PoseStamped` in `base_link` — the cube **centre**, yaw-only orientation |
+| `/cube_marker` | `visualization_msgs/Marker` for RViz |
+| TF | static `base_link → sim_camera`, from the extrinsic, so everything downstream agrees |
+
+Every number is a ROS parameter — `tag_size`, `tag_id`, `extrinsic_xyz`, `extrinsic_quat`,
+`tag_z_base`, `tag_to_cube_z`, `cube_size`, `normalize_yaw_90`. Moving the camera or the robot
+means re-running `scripts/isaac_camera_extrinsic.py` and changing a parameter, not editing code.
+
+Three decisions inside it that are not obvious, all explained in §11:
+
+- **Depth is asserted, not measured** — corrected by ray–plane intersection against `tag_z_base`.
+- **Roll and pitch are forced to zero**; only yaw survives.
+- **Yaw is folded into ±45°**, since a cube looks identical every 90°, so all four grasp angles are
+  equivalent and this keeps the wrist near zero.
+
+Verified 2026-08-11 against USD ground truth: **0.2 mm in X, 0.3 mm in Y, exact in Z**, stable to
+four decimal places across 200 consecutive detections, at ~17 Hz.
 
 ---
 
@@ -467,10 +508,25 @@ detection); the inner 800 px black square is the metric `tag_size`.
 1. Launch Isaac Sim (`~/isaacsim/isaac-sim.sh`), open the scene, press **Play**.
 2. If you edited the graph/stage since the last Play, do one **Stop → Play** cycle first (the
    simulation-view invalidation gotcha, Section 6).
-3. `ros2 topic list` should show `/joint_states` and `/joint_command` within a few seconds — no
-   DDS profile or env var to double-check anymore now that both sides are on the same OS.
+3. `ros2 topic list` should show `/joint_states`, `/joint_command` and `/clock` within a few
+   seconds — no DDS profile or env var to double-check anymore now that both sides are on the same
+   OS. With the camera graph running you should also see `/rgb` and `/camera_info`.
 4. Run `joint_command_publisher`, `joint_controller_gui`, or `ros2 launch ur5e_isaac_control
-   moveit.launch.py` as needed.
+   moveit.launch.py` as needed. Add `launch_rviz:=false` to skip RViz when you don't need it —
+   8 GB VRAM is tight once the camera render product is also live.
+5. To see what the camera sees: `ros2 run rqt_image_view rqt_image_view /rgb`. (If it dies with a
+   `GLIBC_PRIVATE` / `libpthread` error, that is the VSCode-snap GUI conflict — run it from a plain
+   terminal. Same cause as the env-stripping block in `moveit.launch.py`.)
+6. For the cube's pose: `ros2 run ur5e_isaac_control cube_pose_publisher --ros-args
+   -p use_sim_time:=true`, then `ros2 topic echo /cube_pose`.
+
+**If you move the camera, the robot base, or the belt height**, re-run
+`scripts/isaac_camera_extrinsic.py` and update `cube_pose_publisher`'s `extrinsic_*` and
+`tag_z_base` parameters. Those numbers describe a *relationship*, so moving either end invalidates
+them.
+
+**Operating rule:** if you Stop and re-Play Isaac Sim, **restart the ROS launch too.** Sim time
+resets to 0 and nodes that already saw t=1657 will see time jump backwards.
 
 ---
 
@@ -484,26 +540,45 @@ detection); the inner 800 px black square is the metric `tag_size`.
   correctly in the assembled config.
 - `move_group` starts and reports **"You can start planning now!"**.
 - The bridge advertises `/scaled_joint_trajectory_controller/follow_joint_trajectory`.
-- Trajectory interpolation maths (`sample_trajectory`), including edge cases.
-- `kinematics.py` FK/IK round-trip and `apriltag_pose.py` pose math (Section 7 numbers).
+- Trajectory interpolation maths (`sample_trajectory`) — ad-hoc, **not** committed as a test; see
+  ISSUES.md.
+- `kinematics.py` FK/IK round-trip, and `apriltag_pose.py`'s **pose maths** (Section 7 numbers).
+  The FK/IK half was re-run on this machine 2026-09-04 once `ikpy` was installed: `tool0` at
+  0.8521 m at the zero pose, 200-pose IK round-trip 0.0000 mm / 0.0000°.
 - Live joint state streaming and commanded-position control of the real Isaac Sim arm via
   `joint_command_publisher` / `joint_controller_gui`, including the pick-and-place mimic sequence
   and gripper commanding.
 
-**Not yet verified — the actual point of the current milestone:**
+**Verified live 2026-08-10 (the end-to-end chain):**
 
-- MoveIt **planning and the trajectory_bridge executing onto the real Isaac Sim arm**, end-to-end,
-  under the current native-Ubuntu setup. This was attempted once under the old Windows+WSL2 setup
-  (planning worked; the DDS profile then broke RViz's plan-result fetch before Execute could even
-  be tried). Needs Isaac Sim loaded and playing — this is the next checkpoint.
+- MoveIt **planning and `trajectory_bridge` executing onto the real Isaac Sim arm**. RViz Plan
+  succeeds in 5–25 ms; Execute moves the arm, `SUCCEEDED`, worst joint error 0.0000–0.0001 rad.
+- M1b: gripper collision geometry and planning to `grasp_tcp` across the reachable workspace.
+
+**Verified live 2026-08-11 (perception):**
+
+- Isaac Sim publishing `/rgb` + `/camera_info` over the ROS 2 bridge, ~20 Hz, sim-time stamped.
+- `apriltag_pose.py` **detecting** a tag in a live Isaac Sim frame (this had never run before —
+  see Section 7's correction), and the resulting position checked against USD ground truth.
+- OMPL planning large joint-space goals (17 ms, 8 ms) — the "large drags fail" worry.
+- The camera→`base_link` extrinsic, and `cube_pose_publisher` end to end: cube position in
+  `base_link` accurate to 0.2 mm / 0.3 mm / exact, stable over 200 detections.
+- Reach, empirically: the arm was commanded straight out at the cube and observed to fall short,
+  which is what prompted moving the scene. Now 0.745 m against a 0.850 m limit.
+
+**Not yet verified:**
+
+- **Whether USD's `base_link` is yawed relative to the URDF's.** Both the extrinsic and the ground
+  truth it was graded against come from USD, so they share the assumption and cannot detect it.
+  Settle before M4 (ISSUES.md says how).
+- Anything involving the planning scene (M3) or an actual grasp (M4).
 
 ---
 
-## 10. NEXT SESSION: the live test
+## 10. Bringing up the stack, and reading the failures
 
-Everything above is built and unit-tested. The end-to-end test — MoveIt planning a motion and the
-real Isaac Sim arm executing it — has **not been run yet** on this environment. That is the next
-step.
+✅ **This sequence passed on 2026-08-10** — MoveIt plans and the real Isaac Sim arm executes. Kept
+here as the standard bring-up procedure and, more usefully, as a map from symptom to cause.
 
 **Prerequisites, in order. Do not skip the check at step 2.**
 
@@ -538,15 +613,17 @@ step.
 | Step 4 fails (no plan found) | Config, URDF/SRDF, or the goal pose is unreachable |
 | Step 4 works, step 5 does nothing | The bridge — check its terminal output |
 | Step 5 errors "unable to identify any set of controllers" | Action name mismatch (Section 5a) |
-| Both work | **M1 + M2 confirmed on the current setup.** Next: M1b (gripper geometry) and the perception scene (PLAN.md). |
+| Both work | **M1 + M2 confirmed** — as they were on 2026-08-10. |
 
 The RViz Motion Planning panel is dense and not obvious on first use — worth walking through its
 tabs before clicking, rather than hunting for the buttons.
 
-**A known soft failure to expect:** `move_group` may log
-`Didn't receive robot state (joint angles) with recent timestamp within 1.000000 seconds` because
-Isaac Sim stamps `/joint_states` with simulation time, not wall-clock (see PLAN.md's open issues).
-Planning still works off the last known joint values despite the warning.
+**Historical note:** `move_group` used to log `Didn't receive robot state (joint angles) with
+recent timestamp within 1.000000 seconds`, because Isaac Sim stamps `/joint_states` with simulation
+time while `move_group` compared it against wall-clock. Planning tolerated it; **execution did
+not**, and that is why M2 could not be verified for a long time. Resolved 2026-08-10 by publishing
+`/clock` from the Action Graph and setting `use_sim_time: true` on all four nodes. If you see this
+warning again, `/clock` has stopped — check Isaac Sim is playing.
 
 **Benign warnings (safe to ignore):**
 - `SEVERE WARNING!!! ... namespace collision ... InteractiveMarkerDisplay` — cosmetic RViz2/Jazzy
@@ -557,12 +634,156 @@ Planning still works off the last known joint values despite the warning.
 
 ---
 
-## 11. Concepts still ahead
+## 11. Perception: pixels to a pose
+
+Built and verified 2026-08-11. The exact numbers live in PLAN.md; this is what the pieces *do*.
+
+### Why a tag at all
+
+A plain grey cube gives a camera almost nothing: it's texture-less, its silhouette from above is a
+square whichever way it's turned, and a small cube nearby looks identical to a big one far away.
+
+An AprilTag fixes all three by being a **known, asymmetric, high-contrast pattern of known physical
+size**: the known size resolves scale, the asymmetric pattern resolves rotation, the encoded ID
+says *which* object this is. "36h11" means 36 data bits (a 6×6 grid) with a minimum Hamming
+distance of 11 between valid codes — up to 5 bits can be misread and it still decodes correctly, or
+not at all. It never quietly returns the wrong ID.
+
+### The camera model, and where the numbers come from
+
+Everything rests on the pinhole model: a point at `(X, Y, Z)` in the camera's optical frame lands at
+pixel `u = fx·X/Z + cx`, `v = fy·Y/Z + cy`. Those four numbers are the **intrinsics**, published on
+`/camera_info`.
+
+A USD camera is described like a physical one — `focalLength` and `horizontalAperture` — and the
+bridge converts: `fx = width_px × focalLength / horizontalAperture`. Both are in the same units so
+the ratio is unitless, which makes this correct regardless of stage units. Field of view falls out
+of the same two numbers, so "zoom in" and "raise focal length" are the same operation.
+
+Two things must be right or the image is quietly wrong:
+
+- `verticalAperture` must equal `horizontalAperture × height/width`, or `fx ≠ fy`, the image is
+  stretched, and anything measured from it skews. **Set it from a script, not the Property panel** —
+  the panel adjusts these fields as you type and three attempts by hand never converged.
+- The projection must be **perspective**. See ISSUES.md; this one cost a day.
+
+We publish `/camera_info` rather than hardcoding the intrinsics so that changing the lens or
+resolution can't leave a stale copy behind.
+
+### Scale is the whole game
+
+`solvePnP` takes the tag's four corners in pixels, the same four corners in metres (from
+`tag_size`), and the intrinsics, and solves for the rotation and translation that project one onto
+the other.
+
+But a monocular camera measures **angles only**. A small tag close and a large tag far produce
+pixel-identical images. The single thing that breaks the tie is your assertion of the tag's true
+size, and the relationship is linear:
+
+> **Tell the solver the tag is 30% bigger than it is, and it reports the cube 30% further away.**
+> No error, no warning.
+
+Which is why the quiet zone matters. The PNGs are 1040 px with the black pattern occupying the
+inner 800 px. If you map the whole PNG onto a 0.045 m quad, the *black square* is 0.0346 m — pass
+0.045 and every distance is 1.3× too far. Keep the white margin in the texture (the detector needs
+it to find the tag's outer edge) and feed the solver `quad × 0.769`.
+
+### The pixel budget
+
+The tag is 8 cells across, and decoding samples each cell, so you need several pixels per cell.
+Below that the bits alias, the Hamming budget is exhausted, and the tag is **rejected silently** —
+which looks exactly like a broken pipeline. `scripts/isaac_camera_check.py` predicts this from the
+lens and the geometry before anything is built. Measured thresholds are in [ISSUES.md](ISSUES.md).
+
+### Which numbers to trust
+
+Measured against USD ground truth, the detector's **lateral position was accurate to 0.05 mm** and
+its **range was 2.0% long**. That split is structural, not bad luck:
+
+- Lateral position is read directly off where the tag sits in the image — well conditioned.
+- Depth is inferred *entirely* from apparent size, so any bias in corner localisation lands on it.
+  At 14:1 texture minification, mipmap blur makes the detector read the tag ~1.1 px small, and that
+  1.9% becomes 2.0% of range.
+
+The same reasoning applies to orientation: viewing a flat square nearly head-on makes the
+out-of-plane tilt degenerate — two mirror solutions fit almost equally well — while the in-plane
+rotation stays well determined. So: **take X, Y and yaw from vision; take depth and tilt from known
+geometry.** Replacing an ill-conditioned measurement with a known constraint is the correct move,
+not a shortcut.
+
+### Fixing depth properly: slide along the ray, don't overwrite Z
+
+The obvious implementation — keep vision's X and Y, replace Z with the known height — is **not
+good enough**, and the reason is worth understanding because it is invisible in the easy case.
+
+Lateral position comes out of the pinhole model as
+
+```
+X = (u - cx)/fx · Z
+```
+
+It is **proportional to the depth estimate**. So a depth bias does not stay in Z: it leaks
+sideways, in proportion to how far off the optical axis the tag sits.
+
+- Tag directly under the camera → no leak. (An early test in exactly this position measured
+  0.05 mm laterally, which flattered the method and hid the problem.)
+- Tag 7° off-axis → **+4.5 mm in X, −5.1 mm in Y**, alongside −55.5 mm in Z.
+
+The fix follows from what is actually trustworthy. The *direction* from the camera to the tag is
+well determined; only the *distance along it* is biased. And the tag's height is known, because the
+cube sits on a flat belt. So intersect the ray with that plane:
+
+```
+ray   = p_tag_detected − camera_origin        (both in base_link)
+scale = (tag_z_known − camera_z) / ray_z
+p     = camera_origin + scale · ray
+```
+
+One line, and it corrects all three axes at once. Measured result: **0.2 mm, 0.3 mm, exact** — and
+Z stops jittering entirely, because it is no longer being measured.
+
+> This is the same idea that makes cheap colour-blob detection viable without any tag at all: a
+> camera gives you a *ray*, not a point, and something else has to supply the distance. An AprilTag
+> supplies it via known size (fragile — it is the axis every bias lands on). A known ground plane
+> supplies it exactly. When both are available, prefer the plane.
+
+### Frames, and the rotation everyone forgets
+
+`apriltag_pose.py` returns the tag in the **OpenCV optical frame** (X right, Y **down**, Z **out of
+the lens**). MoveIt wants it in `base_link`. That is a three-link chain, and the middle link is the
+one that gets skipped:
+
+```
+T_base_tag  =  T_base_camlink · T_camlink_optical · T_optical_tag
+```
+
+ROS's `camera_link` convention is X forward, Y left, Z up — a fixed 90°/90° rotation from the
+optical frame. Omit it and the cube lands at a plausible distance in entirely the wrong direction.
+
+`T_base_camlink` is a **constant**, because the camera is bolted to the world rather than the
+wrist. That was the point of choosing eye-to-hand: measure once, and the camera keeps watching the
+belt while the arm is busy. `scripts/isaac_camera_extrinsic.py` reads it off the USD stage and
+folds in one more flip most people miss: **a USD camera looks down −Z with +Y up, a ROS optical
+frame looks down +Z with +Y down** — 180° apart about X. Skip that and the tag lands *behind* the
+camera.
+
+That script sidesteps a second trap too. USD matrices are **row-vector** (`p_world = p_local · M`),
+so the rotation block is the transpose of what ROS expects. Rather than transpose by hand and hope,
+it asks USD to transform the camera's own axis directions and builds the rotation from the results
+— correct by construction. It prints the viewing direction as a built-in check: for a top-down
+camera it should read `(0, 0, −1)`.
+
+⚠️ Still note [ISSUES.md](ISSUES.md)'s warning that USD link-frame *orientations* do not match the URDF's. The
+extrinsic and any USD-derived "ground truth" share that assumption, so agreement between them does
+not rule out a yaw offset against the URDF's `base_link`. Confirm visually in RViz.
+
+---
+
+## 12. Concepts still ahead
 
 Deliberately not covered yet; each arrives with its milestone.
 
 - **Collision objects / planning scene** (M3) — teaching MoveIt that the conveyor and table exist.
-- **TCP and grasp frames** (M1b) — planning to the fingertips instead of the bare flange.
 - **Cartesian vs joint-space goals** — "move in a straight line" vs "get there however you like".
 - **Predict-and-intercept** (M5) — why picking a *moving* object isn't solved by re-planning
   continuously, and what is done instead.

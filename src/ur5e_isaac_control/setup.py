@@ -29,6 +29,8 @@ setup(
             'joint_command_publisher = ur5e_isaac_control.joint_command_publisher:main',
             'joint_controller_gui = ur5e_isaac_control.joint_controller_gui:main',
             'trajectory_bridge = ur5e_isaac_control.trajectory_bridge:main',
+            'cube_pose_publisher = ur5e_isaac_control.cube_pose_publisher:main',
+            'pick_orchestrator = ur5e_isaac_control.pick_orchestrator:main',
         ],
     },
 )
