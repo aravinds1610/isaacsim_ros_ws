@@ -36,12 +36,14 @@ I have hands-on Isaac Sim experience; started MoveIt/ROS 2 at zero.
 | File | What it is |
 |---|---|
 | `src/ur5e_isaac_control/launch/moveit.launch.py` | Brings up `robot_state_publisher`, `trajectory_bridge`, `move_group`, `rviz2` |
+| `.../launch/pick_demo.launch.py` | **The whole stack in one command.** *Includes* `moveit.launch.py` (not a copy) and adds `cube_pose_publisher` + `pick_orchestrator`. `auto_start` defaults to **false** — see M4 |
 | `.../ur5e_isaac_control/trajectory_bridge.py` | Custom `FollowJointTrajectory` action server → `/joint_command` |
 | `.../joint_command_publisher.py` | Scripted joint streamer (proven working) |
 | `.../joint_controller_gui.py` | Tk slider panel for jogging joints |
 | `.../kinematics.py` | ikpy-based FK/IK, independent of MoveIt (ikpy installed user-local, `--no-deps`) |
 | `.../apriltag_pose.py` | OpenCV AprilTag 6-DOF pose estimation |
 | `.../cube_pose_publisher.py` | **The perception node.** `/rgb` + `/camera_info` → `/cube_pose` (PoseStamped in `base_link`), `/cube_marker`, static `base_link → sim_camera` TF |
+| `.../pick_orchestrator.py` | **The M4 state machine.** `/cube_pose` → MoveGroup action → gripper. Runs with an **empty planning scene by design** — read its docstring before adding M3 |
 | `src/ur5e_isaac_control/urdf/ur5e.urdf` | Arm-only description, verified against the Isaac articulation |
 | `.../urdf/ur5e_gripper.urdf.xacro` | **Composed** description: `ur5e.urdf` verbatim + 2F-85 geometry + `grasp_tcp`. This is what `moveit.launch.py` loads |
 | `.../config/ur5e_gripper.srdf` | SRDF in use: `ur_manipulator` tipped at `grasp_tcp` + collision matrix. Copy of the Setup Assistant output |
@@ -55,6 +57,7 @@ I have hands-on Isaac Sim experience; started MoveIt/ROS 2 at zero.
 | `scripts/isaac_camera_check.py` | Read-only version. Refuses to run on an orthographic camera |
 | `scripts/isaac_camera_extrinsic.py` | Computes `base_link → sim_camera`, folding in the USD→ROS optical flip. **Re-run whenever the camera *or* robot base moves** |
 | `scripts/isaac_rebake_fixed_joint.py` | Re-bakes a `FixedJoint` to the bodies' current placement |
+| `scripts/isaac_scene_measure.py` | Bounding boxes of the conveyor/table/bin in `base_link`. Output in `scene_measure.txt` (2026-08-11) — the measurement that showed naive M3 blocks M4 |
 | `apriltags/` | Print-ready 36h11 tags, ids 0–3. 1040×1040 px, **inner 800 px is the black square** (ratio 10/13) |
 
 ## Target architecture
@@ -66,10 +69,11 @@ UR5e + Robotiq 2F-85          /joint_states     move_group (ur_moveit_config)
 articulation(s)          <=================>        ^
   ROS2 Publish/Subscribe    (DDS, standard           | plan requests
   Joint State (built)        discovery)               |
-        ^                                     pick_orchestrator node (new)
+        ^                                     pick_orchestrator (written, unrun)
         |  /joint_command, /gripper_command     - state machine
-        |  (FollowJointTrajectory bridge, built)  - talks to move_group via
-        |                                           MoveGroupInterface (Python)
+        |  (FollowJointTrajectory bridge, built)  - talks to move_group via the
+        |                                           MoveGroup action directly
+        |                                           (no moveit_py on this box)
         +--- trajectory_bridge node (built) <----+
                                                        |
                                               conveyor_kinematics node (new)
@@ -94,20 +98,38 @@ once the orchestrator is scripted, but essential while building each milestone.
 | `trajectory_bridge` (FollowJointTrajectory → `/joint_command`) — **M2** | ✅ verified live 2026-08-10 — `SUCCEEDED`, worst joint error 0.0000–0.0001 rad |
 | URDF gripper geometry + `grasp_tcp` — **M1b** | ✅ verified 2026-08-10 — plan+execute across the reachable workspace |
 | Isaac scene: camera + tagged cube + bin | ✅ verified 2026-08-11 — tag detected live at 56.8 px |
-| Perception node (`cube_pose_publisher`) | ✅ verified 2026-08-11 — `/cube_pose` at ~17 Hz, **0.2 mm X, 0.3 mm Y, exact Z** vs USD truth |
-| Planning-scene collision objects — **M3** | ⬜ not started |
-| Fixed-point pick-and-place (`pick_orchestrator`) — **M4** | ⬜ not started |
+| Perception node (`cube_pose_publisher`) | ✅ verified 2026-08-11 — `/cube_pose` at ~17 Hz, **0.2 mm X, 0.3 mm Y, exact Z** vs USD truth. **Re-verified live 2026-09-12**: 600 detections, zero dropouts, cube at `(-0.3649, +0.6161, -0.2040)` — within 0.3 mm of the 2026-08-11 record, so the scene has not moved and the extrinsic still holds |
+| Planning-scene collision objects — **M3** | ⏸️ **deliberately deferred** — the naive version *blocks* M4, see below |
+| Fixed-point pick-and-place (`pick_orchestrator`) — **M4** | 🟡 **written 2026-09-04, never yet run** — code complete, unproven |
+| One-command bring-up (`pick_demo.launch.py`) | 🟡 written 2026-09-12, parses clean, not yet run |
 | Dynamic intercept (`conveyor_kinematics`) — **M5** | ⬜ not started |
 | Closed-loop tracking via `moveit_servo` (stretch) — **M6** | ⬜ not started |
 
-**Immediate next step:** **M3** — register the conveyor, tables, and bin as planning-scene
-collision objects. Perception is complete end to end and the cube is within reach; the planning
-scene is still empty (`world.collision_objects = []`), so the arm would plan straight through the
-furniture. That is the last thing between here and M4's real pick.
+**Immediate next step: run the M4 pick.** Everything it needs is built and verified — perception
+re-confirmed live on 2026-09-12, the orchestrator written, the launch file staged. Nothing has been
+executed yet. Two commands:
 
-> Measurement already in hand: `/World/RobotTable` exists on the stage, and the arm's base is fixed
-> to it at `xyz=(-0.212666, +0.117802, +0.583556)` (from `/World/ur5e/base_link/FixedJoint`).
-> `scripts/isaac_joints_dump.py` re-prints this; the same approach gets the conveyor and bin.
+```bash
+ros2 launch ur5e_isaac_control pick_demo.launch.py        # comes up idle
+ros2 service call /pick_orchestrator/pick_once std_srvs/srv/Trigger
+```
+
+> **`auto_start` is false in the launch file although the node's own default is true.** The node
+> starts its sequence 2 s (sim time) after coming up; launching the whole stack at once means the
+> arm moves before you can confirm RViz looks sane and `/cube_pose` is flowing, and `move_group` is
+> not always ready inside 2 s. Bring it up idle, check, then fire. Pass `auto_start:=true` once the
+> sequence is trusted.
+
+**This one run tests three things at once:**
+
+1. **M4 itself** — the full plan → execute → grasp → place chain.
+2. **The USD↔URDF `base_link` yaw question** (see ISSUES.md). Both are axis-aligned conventions, so
+   the offset can only be 0° or a multiple of 90° — never a subtle few degrees. If they disagree the
+   arm reaches somewhere *visibly* wrong. This is the cheap version of the check; the two-sided FK
+   measurement is only worth building if the pick fails in a way that implicates the frame.
+3. **`grasp_z_offset`**, currently `0.0` — the dial most likely to need tuning. `grasp_tcp`'s
+   0.11181 m is the fingertip *link origin*, not the pad contact face, so the fingers may close
+   slightly high or low. Fingers closing on air, or the wrist driving into the belt, points here.
 
 ## Scene reference numbers (as built 2026-08-11)
 
@@ -188,14 +210,60 @@ Advertises `/scaled_joint_trajectory_controller/follow_joint_trajectory` (the ex
 streams it to `/joint_command` at 60 Hz by sampling against sim time. Proof: RViz Execute moved the
 arm — 49 points, 4.74 s, worst joint error 0.0010 rad, `SUCCEEDED`.
 
-**M3 — Planning scene collision objects.** Register the conveyor rails, belt surface, table and bin
-as collision geometry so plans route around them. Source measurements from
-`isaac_joints_dump.py` / `isaac_conveyor_spawner.py`.
+**M3 — Planning scene collision objects.** ⏸️ **Deliberately deferred, and M4 goes first.** This
+was originally written as a prerequisite for M4. Measurement proved the opposite: done naively it
+**blocks** M4.
 
-**M4 — Fixed-point pick-and-place.** `pick_orchestrator` node: approach a known pick pose → close
-gripper → lift → transfer → place → open → home. Proves the full chain before adding motion.
-Remember the tag is on the cube's **top face** — `T_base_tag` is a plane 0.026 m above the cube
-centre, so grasp poses need that offset or the gripper closes on air.
+`scripts/isaac_scene_measure.py` (2026-08-11) found the conveyor's bounding box spans
+`x [-0.768, 3.235]`, `y [+0.165, +1.341]`, `z [-2.010, +0.301]` in `base_link` — and the cube at
+`(-0.365, +0.616, -0.204)` sits **inside it on all three axes**. Register the conveyor as one box
+from its AABB and *every* grasp pose is permanently in collision; nothing will ever plan.
+
+Why skipping it is safe here:
+
+- **Self-collision checking is unaffected** — it comes from the SRDF's collision matrix, not the
+  world, so the arm still cannot fold into itself.
+- **An empty world is the easiest case for OMPL.** Every collision object is one more way to fail,
+  so an empty scene maximises the chance of a first successful pick.
+- **In simulation, interpenetration costs nothing.** PhysX pushes through; no hardware at risk.
+
+⚠️ **The consequence to accept:** the arm can and may plan straight through the conveyor, the table
+and the bin. Fine in sim. **Do not port this to a real arm without doing M3 properly first.**
+
+When M3 is eventually done properly, two things must be true: furniture geometry stops at the
+**belt surface** rather than using the full AABB, and the bin is added before place poses are
+trusted. Note also that `isaacsim.ros2.nodes` (v1.18.13, verified 2026-09-12) ships
+**`ROS2PublishTransformTree`**, whose `parentPrim` can be set to `/World/ur5e/base_link` so furniture
+poses arrive in ROS already in the robot's frame — a live alternative to transcribing numbers. It
+publishes *poses*, not *geometry*, so box dimensions would still be authored by hand. Do not point
+it at the robot articulation: `robot_state_publisher` already owns `base_link → *`, and two
+publishers for one child frame corrupts the TF tree.
+
+**M4 — Fixed-point pick-and-place.** 🟡 **Written 2026-09-04 (`pick_orchestrator.py`, 490 lines),
+never yet run.** Sequence: `home → above cube → down to grasp → close → lift → above bin → release
+→ retreat → home`. Proves the full chain before adding motion. Remember the tag is on the cube's
+**top face** — `T_base_tag` is a plane 0.026 m above the cube centre, so grasp poses need that
+offset or the gripper closes on air.
+
+Decisions taken while writing it, each non-obvious:
+
+- **Sends the `MoveGroup` action directly, not `MoveGroupInterface`.** This install has no
+  `moveit_py` bindings (`import moveit` fails; only `moveit_msgs` is present), so the Python
+  wrapper PLAN.md originally assumed does not exist. Posting `moveit_msgs/action/MoveGroup` to
+  `/move_action` is what that wrapper does internally, and it keeps the node dependency-free.
+- **Grasp orientation.** `grasp_tcp`'s +Z is the approach axis (inherited from `tool0`), and the
+  cube is picked from directly above, so +Z must point along `base_link`'s −Z: a 180° rotation
+  about X composed with the cube's yaw about base Z — `R = Rz(yaw) · Rx(π)`, i.e. quaternion
+  `(x,y,z,w) = (cos(yaw/2), sin(yaw/2), 0, 0)`. At yaw = 0 that is `(1,0,0,0)`, a clean flip.
+  `cube_pose_publisher` already folds yaw into ±45°, so the wrist never takes the long way round.
+- **The cube pose is latched at pick time, then vision stops being consulted.** Once the gripper is
+  over the cube it occludes the tag, and once grasped the cube's pose is defined by the gripper, not
+  by vision. The sequence checks one pose for freshness (`cube_pose_max_age_sec`, 5 s) and commits.
+  M5 is where a live pose stream starts to matter.
+- **Conservative defaults for a first run:** velocity and acceleration scaling at 0.1, approach and
+  lift heights 0.15 m, and a `max_reach` 0.850 m preflight check (the cube is at 0.745 m).
+- A `~/pick_once` `std_srvs/Trigger` service fires the sequence on demand, which is how
+  `pick_demo.launch.py` drives it with `auto_start:=false`.
 
 **M5 — Dynamic intercept (the actual target).** A `conveyor_kinematics` node computes the cube's
 live pose and picks an intercept point + arrival time; the orchestrator plans once to that
@@ -216,13 +284,21 @@ feed the live pose stream into `moveit_servo` (already installed; `ur_moveit_con
 
 ```
 M1 ──┬── M1b ──┐
-     │         ├── M2 ── M3 ── M4 ── M5 ── M6
-M0 ──┴─────────┘
+     │         ├── M2 ── M4 ── M5 ── M6
+M0 ──┴─────────┘        │
+                        └── M3  (off the critical path — see the milestone)
 ```
 
 M0, M1, M1b and M2 are built **and verified live** (2026-08-10) — the whole
-plan→execute→gripper-aware chain works. Perception is complete and verified live (2026-08-11).
-Next up: **M3** (collision objects), then **M4** (the first real pick).
+plan→execute→gripper-aware chain works. Perception is complete and verified live (2026-08-11,
+re-confirmed 2026-09-12).
+
+**M3 was moved off the critical path** once measurement showed the naive version makes every grasp
+pose permanently in collision. M4 runs against an empty planning scene instead.
+
+Next up: **run M4** — the code exists and has never been executed. Everything upstream of it is
+verified, so a failure now points at the orchestrator, the frame convention, or `grasp_z_offset`,
+not at perception or the bridge.
 
 ## Perception approach (reference)
 
