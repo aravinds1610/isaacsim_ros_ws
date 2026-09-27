@@ -59,6 +59,7 @@ I have hands-on Isaac Sim experience; started MoveIt/ROS 2 at zero.
 | `scripts/isaac_rebake_fixed_joint.py` | Re-bakes a `FixedJoint` to the bodies' current placement |
 | `scripts/isaac_scene_measure.py` | Bounding boxes of the conveyor/table/bin in `base_link`. Output in `scene_measure.txt` (2026-08-11) — the measurement that showed naive M3 blocks M4 |
 | `apriltags/` | Print-ready 36h11 tags, ids 0–3. 1040×1040 px, **inner 800 px is the black square** (ratio 10/13) |
+| `scenes/UR5e_Sim_V1.usd` | **The Isaac stage** M4 was verified on (2026-09-27): camera at the new pose, 1920×1080, focal 40. Robot/conveyor/bin/warehouse are references to NVIDIA's public S3 assets (need internet). The tag texture is an **absolute** path into this repo's `apriltags/`, so it only resolves at `/home/aravindsuresh16/isaacsim_ros_ws`. Copied from `~/Documents/UR5e_Sim_V1.usd`; open and save *this* copy from now on so the two do not drift |
 
 ## Target architecture
 
