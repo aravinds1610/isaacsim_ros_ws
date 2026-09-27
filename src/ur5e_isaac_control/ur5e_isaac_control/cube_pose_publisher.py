@@ -87,8 +87,10 @@ class CubePosePublisher(Node):
         # --- extrinsic: base_link -> camera optical frame -----------------
         # From scripts/isaac_camera_extrinsic.py. Re-run it whenever the camera
         # OR the robot base moves -- it is the relationship between them.
+        # Re-measured 2026-09-27 after the camera was raised to world
+        # (14.4201, 2.59795, 4.89319) for a wider view; rotation unchanged.
         self.declare_parameter('extrinsic_xyz',
-                               [-0.542991, 0.845386, 2.167835])
+                               [-0.345118, 0.863705, 2.883689])
         self.declare_parameter('extrinsic_quat',
                                [0.707112, -0.707101, 0.0, -0.000011])
 

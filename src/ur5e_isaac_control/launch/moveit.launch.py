@@ -81,8 +81,15 @@ def generate_launch_description():
         .robot_description_kinematics(Path('config') / 'kinematics.yaml')
         .joint_limits(Path('config') / 'joint_limits.yaml')
         .trajectory_execution(Path('config') / 'moveit_controllers.yaml')
+        # Pilz (PTP/LIN) is deterministic: same request, same path, every time.
+        # OMPL samples randomly and wanders in an empty scene. OMPL stays the
+        # default so callers that don't name a pipeline are unaffected.
         .planning_pipelines(
-            default_planning_pipeline='ompl', pipelines=['ompl'])
+            default_planning_pipeline='ompl',
+            pipelines=['ompl', 'pilz_industrial_motion_planner'])
+        # Pilz's LIN needs Cartesian speed limits; joint accel limits come
+        # from joint_limits.yaml above.
+        .pilz_cartesian_limits(Path('config') / 'pilz_cartesian_limits.yaml')
         .to_moveit_configs()
     )
 

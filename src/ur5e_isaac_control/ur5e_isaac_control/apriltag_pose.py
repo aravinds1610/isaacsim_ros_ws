@@ -40,6 +40,13 @@ class AprilTagDetector:
             self.params = cv2.aruco.DetectorParameters_create()
         # Sub-pixel corner refinement -> markedly better pose accuracy.
         self.params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
+        # Bit decoding only (corners come from the contour, so pose accuracy is
+        # untouched). Defaults sample 4 px/cell and ignore a 13% margin; with
+        # the tag's black square at ~32 px (8 cells of 4 px, 1080p @ focal 40)
+        # neighbour-cell blur flipped bits and every candidate was rejected.
+        # 8 px/cell + 20% margin reads cell centres cleanly (2026-09-27).
+        self.params.perspectiveRemovePixelPerCell = 8
+        self.params.perspectiveRemoveIgnoredMarginPerCell = 0.2
         self.detector = (cv2.aruco.ArucoDetector(self.dictionary, self.params)
                          if _HAS_ARUCO_DETECTOR else None)
 

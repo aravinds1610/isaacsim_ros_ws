@@ -39,12 +39,23 @@ first, then settled decisions, then resolved issues kept because the *reason* is
   the base origin, or render `/cube_marker` in RViz beside the robot model and check it lands where
   the cube physically is.
 
-- **The camera's view and the arm's reach barely overlap.** The camera is centred over a spot
-  ~1.0 m from the base, so everything *reachable* lands near the edge of the frame — the cube
-  currently sits at image `(1000, 81)` with ~53 px of clearance to the top edge. Fine for a static
-  cube. **Must be fixed before M5**, when the cube moves along the belt and would leave frame:
-  shift the camera so its centre sits over the reachable part of the pick zone, then re-run
-  `isaac_camera_extrinsic.py`. Deliberately deferred until the pick zone is pinned down.
+- **The camera's view and the arm's reach barely overlapped — partly addressed 2026-09-27.** As
+  built, the camera was centred ~1.0 m from the base, so everything *reachable* landed near the
+  frame edge (cube at image `(1000, 81)`, ~53 px from the top). The camera has since been raised
+  0.72 m and switched to 1080p / focal 40, covering ~1.64 × 0.92 m; the cube at base
+  `(+0.004, +0.600)` shows in the upper-right quadrant at `(1198, 225)`. **Still to do before M5:**
+  pin down the pick zone and centre the camera over its reachable part, then re-run
+  `isaac_camera_extrinsic.py`.
+
+- **⚠️ Zooming in the viewport while looking through `/World/Camera` moves the camera prim.** It is
+  not a lens zoom — it dollies the actual camera, silently invalidating the extrinsic. Hit
+  2026-09-27: the camera moved 0.72 m up and 0.20 m sideways, and every `/cube_pose` came out
+  **28 cm** wrong while detection itself was perfect (re-projecting the tag with the camera's *new*
+  pose landed within 0.6 mm of the USD cube). **Rule: change the view with
+  `isaac_camera_setup.py` (focal length), never by scrolling through the camera; after any camera
+  change, compare `/World/Camera`'s Translate against PLAN.md's scene numbers and re-run
+  `isaac_camera_extrinsic.py` if it moved.** The durable fix is to have Isaac publish the camera's
+  pose to TF at run time (`ROS2PublishTransformTree`) instead of hard-coding it — not yet done.
 
 - **⚠️ An orthographic camera silently destroys AprilTag pose estimation.** `/World/Camera` was
   authored `projection = orthographic`. In orthographic there is no perspective, so apparent size
@@ -67,6 +78,16 @@ first, then settled decisions, then resolved issues kept because the *reason* is
   40 px; the current setup gives 56.8. Failure mode is zero detections, which looks exactly like a
   broken pipeline. `isaac_camera_check.py` predicts this before anything is built.
 
+  **Update 2026-09-27:** after the camera change the black square is **~32 px (4 px/cell)** and the
+  default OpenCV detector rejected every candidate — on a sharp, clearly readable tag. Offline
+  tests on a saved frame: upscaling 2× did not help, wider threshold windows did not help;
+  **`perspectiveRemovePixelPerCell` 4 → 8 with `perspectiveRemoveIgnoredMarginPerCell` 0.13 → 0.2
+  did** (now set in `apriltag_pose.py`). These only change how bits are *read*; corners still come
+  from the contour, so pose accuracy is unaffected. Detection is still **intermittent** at this
+  size — fine for a latched static pick, not for M5. Focal 50 at 1080p (~5 px/cell) is the easy
+  margin. Note `isaac_camera_setup.py`'s pixel prediction includes the tag's white border, so it
+  reads ~30% high against the black square that actually matters.
+
 - **`isaac_conveyor_spawner.py` has two stale/wrong lines.** `TAG_TEXTURE` still points at
   `\\wsl.localhost\Ubuntu\...\isaac_sim_ros\apriltags\...` — a Windows UNC path from the retired
   WSL2 setup, to a directory that no longer exists; on native Ubuntu it must be
@@ -80,6 +101,9 @@ first, then settled decisions, then resolved issues kept because the *reason* is
   to `True`). ROS nodes that already saw t=1657 then see time jump backwards, which breaks them.
   **Operating rule: if you Stop and re-Play Isaac Sim, restart the ROS launch too.** Alternative if
   this becomes annoying: set `resetOnStop = False` so sim time increases monotonically.
+  Concrete casualty, 2026-09-27: `pick_orchestrator` kept a pose from before the reset, whose age
+  came out **negative** and so passed `age <= 5 s` — it re-picked the cube's old position after the
+  cube had been moved. Fixed (`0 <= age`), but any other age check is exposed the same way.
 
 - **`scripts/isaac_gripper_measure.py` gives unreliable cross-link transforms.** It compares
   `ComputeLocalToWorldTransform` across links that are flat siblings in the articulation, so its
@@ -102,16 +126,48 @@ first, then settled decisions, then resolved issues kept because the *reason* is
   writing.
 
 - **8 GB VRAM** (RTX 4060 Laptop) is at Isaac Sim's stated minimum for a scene this size — watch
-  for it once the conveyor + camera + collision scene is all loaded together.
+  for it once the conveyor + camera + collision scene is all loaded together. Measured 2026-09-27
+  with the 1080p camera, viewport and RViz running: **6.4 / 8.2 GB, GPU at 100%, sim at ~0.4× real
+  time.** Everything runs on sim time so it still works, just slowly.
+
+- **`wrist_1` lagged 1.67 rad behind its command on one move, cause unknown (2026-09-27).** On the
+  PTP from straight-up to the ready pose, `wrist_1`'s tracking error grew to 1.67 rad while
+  pan/lift/elbow stayed within ~0.1 rad; the arm then reached the target during the settle window.
+  Earlier, a slow (0.1 scaling) approach showed `shoulder_pan` falling behind at a steady
+  ~0.07 rad/s from 12 s in, then also reaching the target. Ruled out: a joint velocity cap
+  (`Maximum Joint Velocity` = inf) and `wrist_2`'s drive on its own (clean in mid-air slider
+  tests). Drive values as authored: stiffness 9400 (pan) / 3940 (wrists) **per degree**, max force
+  150 / 28 N·m, damping 0.378 (pan), **1.579 (wrist_1) vs 0.061 (wrist_2)** — the 26× wrist
+  damping mismatch on otherwise identical joints is unexplained. Masked by `goal_time_sec`;
+  **must be understood before M5**, where arriving late is failing. Diagnostic tool: the per-joint
+  error recorder that subscribes to the bridge's action feedback
+  (`/scaled_joint_trajectory_controller/follow_joint_trajectory/_action/feedback`).
+
+- **`timeout N ros2 topic hz|echo … | grep` prints nothing even when the topic is live.** Python
+  block-buffers stdout into a pipe, and `timeout` kills it before the buffer is flushed — so an
+  empty result is an artefact, not evidence. Cost a wrong "no images arriving" diagnosis on
+  2026-09-27. Use `PYTHONUNBUFFERED=1`, `--once` (exits cleanly), or redirect to a file.
 
 ## Settled decisions and config notes
 
-- **Execution speed lives in RViz, not in our config.** `ur_moveit_config`'s `joint_limits.yaml`
-  defines *no* scaling factors, so the effective 0.1 comes from the RViz Motion Planning panel's
-  own defaults (Velocity/Acceleration Scaling, Planning tab). MSA's generated `joint_limits.yaml`
-  does set `0.1` but is not loaded. For scripted control later, use
-  `setMaxVelocityScalingFactor()` / `setMaxAccelerationScalingFactor()`, which is how M4/M5 should
-  run slow near the object and fast in transit.
+- **Execution speed is set per request, not in config.** `ur_moveit_config`'s `joint_limits.yaml`
+  defines *no* scaling factors, so RViz's 0.1 comes from its Motion Planning panel's own defaults
+  (Planning tab). MSA's generated `joint_limits.yaml` sets `0.1` but is not loaded. The
+  orchestrator sets `max_velocity/acceleration_scaling_factor` on every `MoveGroup` request from
+  its `velocity_scaling` / `acceleration_scaling` parameters (**0.3** since 2026-09-27).
+
+- **Pilz for scripted motion, OMPL left as the default pipeline (2026-09-27).** OMPL paths are
+  random; Pilz PTP/LIN are deterministic. The orchestrator sets `pipeline_id` + `planner_id` per
+  request, so RViz's dropdown does not affect the pick. For hand-planning in RViz, pick
+  `pilz_industrial_motion_planner` / `PTP` in the Context tab, or flip `default_planning_pipeline`
+  in `moveit.launch.py`. Pilz does **not** avoid obstacles — it validates a path and refuses a
+  colliding one — and PTP only makes the *path* deterministic: the goal joints still come from IK.
+
+- **Never start a pose move from the straight-up pose.** `[0, -π/2, 0, 0, 0, 0]` (SRDF `home`/`up`)
+  is a singularity; IK seeded there picks an arbitrary branch, and a PTP to it swept the upper arm
+  through the base (2026-09-27). The orchestrator's `HOME_JOINTS` is an elbow-up, tool-down ready
+  pose instead. Same root cause as RViz marker drags sometimes swinging "all the way round": RViz
+  seeds IK from the marker's previous solution, not from the robot.
 
 - **`allowed_start_tolerance` raised 0.01 → 0.05 rad** in `moveit.launch.py`. The 0.01 default
   (0.57°) is tight for a physics sim where the arm settles slightly under gravity between moves.
@@ -132,6 +188,22 @@ first, then settled decisions, then resolved issues kept because the *reason* is
   "goal was bad" apart from "the stack is broken".
 
 ## Resolved
+
+- ✅ **"Goal tolerance exceeded" after long moves was lag, not a collision (2026-09-27).** The first
+  M4 run aborted with the arm ~0.52 rad off its goal, and the per-joint trace (one joint tracking,
+  then falling behind linearly) was first read as the arm jamming against the conveyor. Wrong:
+  forward kinematics on `/joint_states` afterwards put the TCP **3 mm / 2°** from the goal — the arm
+  had arrived, late. A blocked arm stops *short*; a lagging one gets there. Fixed with the bridge's
+  `goal_time_sec` settle window; the lag itself is an open issue above. **Rule: before calling it
+  a collision, check where the arm ended up.**
+
+- ✅ **Wrist spun ~25 turns and knocked the cube away at the grasp (2026-09-27).** `grasp_z_offset`
+  0.0 put the fingertip link origin at the cube centre, 25 mm above the belt; the finger pads reach
+  ~30–40 mm past that origin, so they drove into the belt and the contact fight with the stiff
+  joint drives blew up the physics (`wrist_2` at 156.6 rad, `finger_joint` at −1.19). Mid-air
+  tests of `wrist_2` and the gripper were clean, isolating contact as the trigger. Fixed with
+  `grasp_z_offset` +0.02; M4 then completed. **Symptom to recognise:** joint values far outside
+  anything commanded = PhysX blow-up, look for an unintended contact.
 
 - ✅ **`kinematics.py` could not run — `ikpy` was missing (2026-09-04).** Installed user-local with
   `pip install --user --no-deps --break-system-packages ikpy` (4.1.0). **`--no-deps` is the

@@ -84,6 +84,11 @@ class TrajectoryBridge(Node):
         # Isaac Sim's PD drives track the commanded pose with some lag, so the
         # final position won't match exactly. Fail the goal only past this.
         self.declare_parameter('goal_tolerance_rad', 0.05)
+        # How long (sim time) the arm may take to settle within goal_tolerance
+        # after the last waypoint -- the same idea as joint_trajectory_
+        # controller's constraints.goal_time. Long moves were measured ending
+        # 0.5-0.6 rad behind yet reaching the target exactly shortly after.
+        self.declare_parameter('goal_time_sec', 2.0)
 
         action_name = self.get_parameter('action_name').value
         self.command_topic = self.get_parameter('command_topic').value
@@ -91,6 +96,7 @@ class TrajectoryBridge(Node):
         self.rate_hz = float(self.get_parameter('rate_hz').value)
         self.goal_tolerance = float(
             self.get_parameter('goal_tolerance_rad').value)
+        self.goal_time = float(self.get_parameter('goal_time_sec').value)
 
         self.current_positions = {}
 
@@ -225,15 +231,28 @@ class TrajectoryBridge(Node):
         # Let the PD drives settle onto the final commanded pose before judging.
         # Waited on the node clock too: if the sim runs below real time, 0.2 s
         # of wall clock is less than 0.2 s of settling as the robot sees it.
+        # Poll until every joint is within tolerance or goal_time runs out; the
+        # 0.2 s minimum keeps the old behaviour for moves that track closely.
         final = list(points[-1].positions)
         self._sleep_clock(0.2)
-        actual = self._actual_positions(joint_names)
-        worst = max((abs(a - f) for a, f in zip(actual, final)), default=0.0)
+        settle_start = self._now()
+        wall_settle_start = time.monotonic()
+        while rclpy.ok():
+            actual = self._actual_positions(joint_names)
+            worst = max((abs(a - f) for a, f in zip(actual, final)), default=0.0)
+            if worst <= self.goal_tolerance:
+                break
+            if (self._now() - settle_start >= self.goal_time
+                    or time.monotonic() - wall_settle_start > self.goal_time * 10):
+                break
+            self.pub.publish(msg)   # keep holding the final waypoint
+            time.sleep(period)
+        settle = 0.2 + (self._now() - settle_start)
 
         if self.current_positions and worst > self.goal_tolerance:
             self.get_logger().warn(
                 f'Goal tolerance exceeded: worst joint error {worst:.4f} rad '
-                f'> {self.goal_tolerance:.4f} rad.')
+                f'> {self.goal_tolerance:.4f} rad after {settle:.2f}s settling.')
             result.error_code = result.GOAL_TOLERANCE_VIOLATED
             result.error_string = f'worst joint error {worst:.4f} rad'
             goal_handle.abort()
@@ -242,7 +261,7 @@ class TrajectoryBridge(Node):
         goal_handle.succeed()
         result.error_code = result.SUCCESSFUL
         self.get_logger().info(
-            f'Trajectory complete in {duration:.2f}s '
+            f'Trajectory complete in {duration:.2f}s + {settle:.2f}s settling '
             f'(worst joint error {worst:.4f} rad).')
         return result
 

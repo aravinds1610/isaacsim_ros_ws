@@ -77,9 +77,13 @@ ARM_JOINTS = [
     'wrist_1_joint', 'wrist_2_joint', 'wrist_3_joint',
 ]
 
-# SRDF group_state "home", expanded. The MoveGroup action takes constraints, not
-# named targets, so the values have to be spelled out here.
-HOME_JOINTS = [0.0, -1.5707, 0.0, 0.0, 0.0, 0.0]
+# A "ready" pose, NOT the SRDF's straight-up "home". Straight up is a
+# singularity: IK seeded from it lands on an arbitrary branch, and Pilz PTP
+# then swept the upper arm through the base to get there. This pose is elbow
+# up, TCP pointing straight down, panned toward the cube (atan2(0.616, -0.365)).
+# Offline IK from here to the approach pose stays on the same branch (every
+# joint moves < 0.9 rad) and matches the config the arm reached live.
+HOME_JOINTS = [2.1, -1.5707, 1.5707, -1.5707, -1.5707, 0.0]
 
 MOVEIT_SUCCESS = 1          # moveit_msgs/MoveItErrorCodes.SUCCESS
 
@@ -108,10 +112,12 @@ class PickOrchestrator(Node):
 
         # --- grasp geometry ------------------------------------------------
         # grasp_tcp is the fingertip LINK ORIGIN at the closed knuckle angle,
-        # not the pad contact face (see ur5e_gripper.urdf.xacro). Commanding it
-        # to the cube's centre straddles a 50 mm cube at mid-height. Trim this
-        # once a real grasp can be observed.
-        self.declare_parameter('grasp_z_offset', 0.0)
+        # not the pad contact face (see ur5e_gripper.urdf.xacro). At 0.0 (TCP at
+        # the cube centre, 25 mm above the belt) the pads, which reach roughly
+        # 30-40 mm past that origin, drove into the belt: the contact fight
+        # spun wrist_2 ~25 turns (2026-09-27). +0.02 keeps the tips ~5 mm
+        # above the belt while still gripping ~40 mm of the cube.
+        self.declare_parameter('grasp_z_offset', 0.02)
         self.declare_parameter('approach_height', 0.15)
         self.declare_parameter('lift_height', 0.15)
 
@@ -135,8 +141,12 @@ class PickOrchestrator(Node):
         self.declare_parameter('command_topic', '/joint_command')
 
         # --- planning -------------------------------------------------------
-        self.declare_parameter('velocity_scaling', 0.1)
-        self.declare_parameter('acceleration_scaling', 0.1)
+        # Pilz, not OMPL: deterministic paths. Each move picks PTP (joint-space
+        # sweep, for the long moves) or LIN (straight TCP line, for descend and
+        # lift, which also can't flip to a different IK branch mid-move).
+        self.declare_parameter('pipeline_id', 'pilz_industrial_motion_planner')
+        self.declare_parameter('velocity_scaling', 0.3)
+        self.declare_parameter('acceleration_scaling', 0.3)
         self.declare_parameter('planning_time', 5.0)
         self.declare_parameter('planning_attempts', 10)
         self.declare_parameter('position_tolerance', 0.005)
@@ -164,6 +174,7 @@ class PickOrchestrator(Node):
         self.gripper_open = float(g('gripper_open').value)
         self.gripper_closed = float(g('gripper_closed').value)
         self.gripper_settle = float(g('gripper_settle_sec').value)
+        self.pipeline_id = g('pipeline_id').value
         self.vel_scale = float(g('velocity_scaling').value)
         self.acc_scale = float(g('acceleration_scaling').value)
         self.planning_time = float(g('planning_time').value)
@@ -245,10 +256,12 @@ class PickOrchestrator(Node):
         return False
 
     # -- goal construction ---------------------------------------------------
-    def _base_goal(self):
+    def _base_goal(self, planner_id):
         goal = MoveGroup.Goal()
         req = goal.request
         req.group_name = self.group_name
+        req.pipeline_id = self.pipeline_id
+        req.planner_id = planner_id
         req.num_planning_attempts = self.planning_attempts
         req.allowed_planning_time = self.planning_time
         req.max_velocity_scaling_factor = self.vel_scale
@@ -361,16 +374,16 @@ class PickOrchestrator(Node):
             f'{d:.3f} m from base')
         return True
 
-    def move_to_pose(self, xyz, yaw, label):
+    def move_to_pose(self, xyz, yaw, label, planner_id='PTP'):
         if not self._check_reach(xyz, label):
             return False
-        goal = self._base_goal()
+        goal = self._base_goal(planner_id)
         goal.request.goal_constraints = [
             self._pose_constraints(xyz, grasp_quaternion(yaw))]
-        return self._send(goal, label)
+        return self._send(goal, f'{label} [{planner_id}]')
 
     def move_home(self):
-        goal = self._base_goal()
+        goal = self._base_goal('PTP')
         goal.request.goal_constraints = [self._joint_constraints(HOME_JOINTS)]
         return self._send(goal, 'home')
 
@@ -404,7 +417,10 @@ class PickOrchestrator(Node):
             if pose is not None:
                 stamp = pose.header.stamp.sec + pose.header.stamp.nanosec * 1e-9
                 age = (self.get_clock().now().nanoseconds * 1e-9) - stamp
-                if age <= self.max_pose_age:
+                # Negative age = stamped in the future = the sim clock was reset
+                # (Isaac Stop -> Play restarts /clock at 0). That pose predates
+                # the reset, so the cube may since have moved: reject it.
+                if 0.0 <= age <= self.max_pose_age:
                     p = pose.pose.position
                     q = pose.pose.orientation
                     yaw = yaw_from_quaternion(q.x, q.y, q.z, q.w)
@@ -451,13 +467,13 @@ class PickOrchestrator(Node):
 
         steps = [
             ('approach cube', lambda: self.move_to_pose(above, yaw, 'approach cube')),
-            ('descend to grasp', lambda: self.move_to_pose(grasp, yaw, 'descend to grasp')),
+            ('descend to grasp', lambda: self.move_to_pose(grasp, yaw, 'descend to grasp', 'LIN')),
             ('close gripper', lambda: self.set_gripper(self.gripper_closed, 'close gripper')),
-            ('lift', lambda: self.move_to_pose(lift, yaw, 'lift')),
+            ('lift', lambda: self.move_to_pose(lift, yaw, 'lift', 'LIN')),
             ('above bin', lambda: self.move_to_pose(above_place, 0.0, 'above bin')),
-            ('lower into bin', lambda: self.move_to_pose(place, 0.0, 'lower into bin')),
+            ('lower into bin', lambda: self.move_to_pose(place, 0.0, 'lower into bin', 'LIN')),
             ('release', lambda: self.set_gripper(self.gripper_open, 'release')),
-            ('retreat', lambda: self.move_to_pose(above_place, 0.0, 'retreat')),
+            ('retreat', lambda: self.move_to_pose(above_place, 0.0, 'retreat', 'LIN')),
             ('home', self.move_home),
         ]
 

@@ -69,7 +69,7 @@ UR5e + Robotiq 2F-85          /joint_states     move_group (ur_moveit_config)
 articulation(s)          <=================>        ^
   ROS2 Publish/Subscribe    (DDS, standard           | plan requests
   Joint State (built)        discovery)               |
-        ^                                     pick_orchestrator (written, unrun)
+        ^                                     pick_orchestrator (verified, M4)
         |  /joint_command, /gripper_command     - state machine
         |  (FollowJointTrajectory bridge, built)  - talks to move_group via the
         |                                           MoveGroup action directly
@@ -91,23 +91,21 @@ once the orchestrator is scripted, but essential while building each milestone.
 | Isaac ↔ ROS2 joint bridge (Action Graph, `/joint_states`, `/joint_command`) | ✅ verified |
 | `joint_command_publisher`, `joint_controller_gui` | ✅ verified |
 | `kinematics.py` (ikpy FK/IK) | ✅ validated — 200-pose IK round-trip, 0.0000 mm (re-verified here 2026-09-04) |
-| `apriltag_pose.py` (36h11 + solvePnP) | ✅ verified live 2026-08-11 off the Isaac camera |
+| `apriltag_pose.py` (36h11 + solvePnP) | ✅ verified live 2026-08-11 off the Isaac camera. 2026-09-27: bit sampling raised to 8 px/cell so a ~32 px tag (4 px/cell) decodes — see ISSUES.md |
 | Gripper (2F-85) ROS2 wiring — **M0** | ✅ commandable (`finger_joint`: 0.0 open → ~0.6–0.8 closed) |
 | MoveIt bring-up (`moveit.launch.py`) — **M1** | ✅ verified 2026-08-10 — RViz Plan succeeds (5–25 ms typical) |
 | Sim-time alignment (`/clock` + `use_sim_time`) | ✅ verified 2026-08-10 — prerequisite for M2 |
 | `trajectory_bridge` (FollowJointTrajectory → `/joint_command`) — **M2** | ✅ verified live 2026-08-10 — `SUCCEEDED`, worst joint error 0.0000–0.0001 rad |
 | URDF gripper geometry + `grasp_tcp` — **M1b** | ✅ verified 2026-08-10 — plan+execute across the reachable workspace |
-| Isaac scene: camera + tagged cube + bin | ✅ verified 2026-08-11 — tag detected live at 56.8 px |
-| Perception node (`cube_pose_publisher`) | ✅ verified 2026-08-11 — `/cube_pose` at ~17 Hz, **0.2 mm X, 0.3 mm Y, exact Z** vs USD truth. **Re-verified live 2026-09-12**: 600 detections, zero dropouts, cube at `(-0.3649, +0.6161, -0.2040)` — within 0.3 mm of the 2026-08-11 record, so the scene has not moved and the extrinsic still holds |
+| Isaac scene: camera + tagged cube + bin | ✅ verified 2026-08-11. **Camera changed 2026-09-27**: raised 0.72 m, 1080p, focal 40 — wider view, tag now ~32 px. Numbers below |
+| Perception node (`cube_pose_publisher`) | ✅ verified 2026-08-11 — `/cube_pose` at ~17 Hz, **0.2 mm X, 0.3 mm Y, exact Z** vs USD truth. **Re-verified live 2026-09-12**: 600 detections, zero dropouts, cube at `(-0.3649, +0.6161, -0.2040)` — within 0.3 mm of the 2026-08-11 record, so the scene has not moved and the extrinsic still holds. **2026-09-27**: extrinsic re-measured for the moved camera; tag re-projects to within 0.6 mm of the USD cube. Detection is intermittent at 4 px/cell (enough for a static pick) |
 | Planning-scene collision objects — **M3** | ⏸️ **deliberately deferred** — the naive version *blocks* M4, see below |
-| Fixed-point pick-and-place (`pick_orchestrator`) — **M4** | 🟡 **written 2026-09-04, never yet run** — code complete, unproven |
-| One-command bring-up (`pick_demo.launch.py`) | 🟡 written 2026-09-12, parses clean, not yet run |
+| Fixed-point pick-and-place (`pick_orchestrator`) — **M4** | ✅ **verified live 2026-09-27** — full pick → place, twice, at two cube positions 37 cm apart (the second found only via the camera) |
+| One-command bring-up (`pick_demo.launch.py`) | ✅ verified 2026-09-27 |
 | Dynamic intercept (`conveyor_kinematics`) — **M5** | ⬜ not started |
 | Closed-loop tracking via `moveit_servo` (stretch) — **M6** | ⬜ not started |
 
-**Immediate next step: run the M4 pick.** Everything it needs is built and verified — perception
-re-confirmed live on 2026-09-12, the orchestrator written, the launch file staged. Nothing has been
-executed yet. Two commands:
+**Running the M4 pick** (Isaac playing, cube in view):
 
 ```bash
 ros2 launch ur5e_isaac_control pick_demo.launch.py        # comes up idle
@@ -120,40 +118,41 @@ ros2 service call /pick_orchestrator/pick_once std_srvs/srv/Trigger
 > not always ready inside 2 s. Bring it up idle, check, then fire. Pass `auto_start:=true` once the
 > sequence is trusted.
 
-**This one run tests three things at once:**
+**If you Stop/Play Isaac, restart this launch too** (sim time resets to 0 — ISSUES.md). The
+orchestrator now *rejects* a cube pose stamped before the reset rather than re-picking the old
+spot, but the other nodes still expect a fresh start.
 
-1. **M4 itself** — the full plan → execute → grasp → place chain.
-2. **The USD↔URDF `base_link` yaw question** (see ISSUES.md). Both are axis-aligned conventions, so
-   the offset can only be 0° or a multiple of 90° — never a subtle few degrees. If they disagree the
-   arm reaches somewhere *visibly* wrong. This is the cheap version of the check; the two-sided FK
-   measurement is only worth building if the pick fails in a way that implicates the frame.
-3. **`grasp_z_offset`**, currently `0.0` — the dial most likely to need tuning. `grasp_tcp`'s
-   0.11181 m is the fingertip *link origin*, not the pad contact face, so the fingers may close
-   slightly high or low. Fingers closing on air, or the wrist driving into the belt, points here.
+The first run (2026-09-27) settled the three open questions it was meant to test: the chain works
+end to end; USD and URDF `base_link` agree (the arm reached the approach pose to 3 mm / 2°, so there
+is no 90° yaw offset); and `grasp_z_offset` needed **+0.02** (see M4).
 
-## Scene reference numbers (as built 2026-08-11)
+**Next: decide M5's approach** — see the M5 milestone.
 
-Post-move values. **Anything derived from these needs re-deriving if the scene moves again** — in
-particular re-run `isaac_camera_extrinsic.py`.
+## Scene reference numbers (as built 2026-08-11, camera updated 2026-09-27)
+
+**Anything derived from these needs re-deriving if the scene moves again** — in particular re-run
+`isaac_camera_extrinsic.py`. Zooming or dragging in the viewport *while looking through
+`/World/Camera`* moves the camera prim itself; that is how it moved on 2026-09-27 (0.72 m, without
+anyone intending to), and every `/cube_pose` went 28 cm wrong.
 
 | Thing | Value |
 |---|---|
-| Cube | `/World/Cube`, **0.05 m**, RigidBody on the belt. World `(14.39997, 2.35000, 1.80553)` |
+| Cube | `/World/Cube`, **0.05 m**, RigidBody on the belt. World `(14.39997, 2.35000, 1.80553)` originally; M4's second run used `(14.76941, 2.33410, 1.80553)` |
 | Tag decal | `/World/Cube/tag`, quad edge 0.048 m (= 0.96 × cube edge) |
 | **`tag_size_m`** | **0.03692 m** — the *black square*, = quad × 800/1040. Feed this to `AprilTagDetector` |
 | Tag plane | 0.026 m above the cube centre (0.025 + 1 mm z-fight lift) |
 | Robot base | `/World/ur5e/base_link`, world `(14.76516, 1.73420, 2.00951)`, no rotation relative to world |
-| Camera | `/World/Camera`, **perspective**, focalLength 80, hAp 27.8254, vAp 15.6518 |
-| Intrinsics | fx = fy = **3680.09**, cx 640, cy 360, zero distortion, 1280×720 |
-| Camera pose | world `(14.2222, 2.5796, 4.1773)`, pointing **straight down** |
-| **Extrinsic** | `base_link → sim_camera` (optical): xyz `(-0.542991, +0.845386, +2.167835)`, quat xyzw `(0.707112, -0.707101, 0, -0.000011)` |
-| **`tag_z_base`** | **-0.177978 m** — tag plane height in `base_link`. The node's depth reference |
-| Cube in `base_link` | `(-0.3652, +0.6158, -0.2040)`, **0.745 m from base** (UR5e reach 0.850 m) |
-| View covered | 0.85 × 0.48 m; camera→tag 2.364 m |
-| Topics | `/rgb` (rgb8, ~20 Hz) and `/camera_info`, both `frame_id: sim_camera`, sim-time stamped |
+| Camera | `/World/Camera`, **perspective**, focalLength **40**, hAp 27.8254 (was 80 until 2026-09-27) |
+| Intrinsics | fx = fy = **2760.07**, cx 960, cy 540, zero distortion, **1920×1080** (was 3680.09 @ 1280×720) |
+| Camera pose | world `(14.4201, 2.59795, 4.89319)`, rotate `(0, 0, -90)`, pointing **straight down** (was `(14.2222, 2.5796, 4.1773)`) |
+| **Extrinsic** | `base_link → sim_camera` (optical): xyz `(-0.345118, +0.863705, +2.883689)`, quat xyzw `(0.707112, -0.707101, 0, -0.000011)` — re-measured 2026-09-27 |
+| **`tag_z_base`** | **-0.177978 m** — tag plane height in `base_link`. The node's depth reference. Unchanged by the camera move |
+| Cube in `base_link` | originally `(-0.3652, +0.6158, -0.2040)`, 0.745 m from base; second run `(+0.0043, +0.5999, -0.2040)`, 0.63 m (UR5e reach 0.850 m) |
+| View covered | ~1.64 × 0.92 m; camera→tag ~3.06 m. Tag black square **~32 px (4 px/cell)** — at the detection limit |
+| Topics | `/rgb` (rgb8, 6.2 MB/frame) and `/camera_info`, both `frame_id: sim_camera`, sim-time stamped. Sim runs **~0.4× real time** at 1080p |
 
 Camera Action Graph is kept **separate** from the joint/clock graph so it can be disabled on its
-own (8 GB VRAM): `On Playback Tick` → `Isaac Create Render Product` (`/World/Camera`, 1280×720) →
+own (8 GB VRAM): `On Playback Tick` → `Isaac Create Render Product` (`/World/Camera`, **1920×1080**) →
 `ROS2 Camera Helper` (`rgb`) **and** `ROS2 Camera Info Helper` (`camera_info`), each taking both
 `execOut` and `renderProductPath`.
 
@@ -170,9 +169,10 @@ does not drift as the cube moves — unlike shrinking `tag_size_m`, which only a
 one distance. Implemented in `cube_pose_publisher`: **X +0.2 mm, Y +0.3 mm, Z exact (asserted), Z
 jitter 0** over 200 consecutive detections. Full derivation in [EXPLAINED.md](EXPLAINED.md) §11.
 
-> ⚠️ **What this does *not* prove:** the extrinsic and the "truth" both come from USD's `base_link`,
-> so a yaw offset between USD's `base_link` and the URDF's would leave both wrong together and this
-> check would still pass. **Settle before M4** — see ISSUES.md.
+> **What this did *not* prove** was the USD↔URDF `base_link` yaw, since the extrinsic and the
+> "truth" both come from USD. ✅ **Settled by M4 (2026-09-27):** the arm reached perception's
+> approach pose to 3 mm / 2° and grasped the cube, which a yaw offset (necessarily 90° or more)
+> could not survive.
 
 ## Milestones
 
@@ -239,13 +239,45 @@ publishes *poses*, not *geometry*, so box dimensions would still be authored by 
 it at the robot articulation: `robot_state_publisher` already owns `base_link → *`, and two
 publishers for one child frame corrupts the TF tree.
 
-**M4 — Fixed-point pick-and-place.** 🟡 **Written 2026-09-04 (`pick_orchestrator.py`, 490 lines),
-never yet run.** Sequence: `home → above cube → down to grasp → close → lift → above bin → release
-→ retreat → home`. Proves the full chain before adding motion. Remember the tag is on the cube's
-**top face** — `T_base_tag` is a plane 0.026 m above the cube centre, so grasp poses need that
-offset or the gripper closes on air.
+**M4 — Fixed-point pick-and-place.** ✅ **Verified live 2026-09-27** (`pick_orchestrator.py`,
+written 2026-09-04). Sequence: `home → above cube → down to grasp → close → lift → above bin →
+release → retreat → home`. Picked and placed twice, at two cube positions 37 cm apart; the second
+position was known only through the camera. `/cube_pose` is the cube **centre** (the node already
+subtracts `tag_to_cube_z` 0.026 m from the tag plane).
 
-Decisions taken while writing it, each non-obvious:
+What it took to get the first run through, in the order it was found (each is non-obvious):
+
+- **Pilz, not OMPL.** OMPL's RRTConnect samples randomly: every plan was a different wandering
+  path, fine for self-collision but useless for a predictable pick. `moveit.launch.py` now loads
+  `pilz_industrial_motion_planner` beside OMPL (OMPL stays the pipeline *default*; UR's config
+  package already ships Pilz's pipeline YAML, `pilz_cartesian_limits.yaml` and the joint
+  acceleration limits it requires). The orchestrator names the pipeline and planner **per
+  request**: **PTP** (joint-space sweep) for home / above cube / above bin, **LIN** (straight TCP
+  line) for descend, lift, lower and retreat. RViz's dropdown is irrelevant to the pick.
+- **Home is a "ready" pose, not straight up.** The SRDF `home` `[0, -π/2, 0, 0, 0, 0]` is a
+  **singularity**, so the IK solution Pilz found for "above the cube" from there was an arbitrary
+  branch (shoulder_lift −1.4 rad, wrist_3 −2.4 rad away), and PTP's straight joint line swept the
+  upper arm through the base — `ValidateSolution` rejected it (`upper_arm_link` vs
+  `base_link_inertia`). `HOME_JOINTS` is now `[2.1, -π/2, π/2, -π/2, -π/2, 0]`: elbow up, TCP
+  pointing straight down, panned toward the cube. From there, IK stays on the same branch (every
+  joint < 0.9 rad) and matches the configuration the arm actually reached. **Deterministic path ≠
+  deterministic goal**: the goal joints still come from IK, and IK is only as good as its seed.
+- **`grasp_z_offset` = +0.02**, not 0. At 0 the TCP (fingertip link *origin*) went to the cube
+  centre, 25 mm above the belt, and the pads — ~30–40 mm past that origin — drove into the belt.
+  The contact fight blew up the physics: `wrist_2` spun ~25 turns, `finger_joint` read −1.19
+  (outside 0…0.8), and the cube was knocked away. Mid-air tests of `wrist_2` and the gripper were
+  both clean, which pinned it on contact.
+- **`trajectory_bridge` waits up to `goal_time_sec` (2 s) to settle** before judging the 0.05 rad
+  goal tolerance (was a fixed 0.2 s). Long moves ended 0.5–0.6 rad behind yet reached the target
+  exactly shortly after, so the goal was being failed while the arm was still arriving. Same idea
+  as `joint_trajectory_controller`'s `constraints.goal_time`; the tolerance itself is unchanged.
+  **Why it lags is still open** — see ISSUES.md.
+- **Speed 0.3** (velocity and acceleration scaling), up from the 0.1 first-run default.
+- **Stale-pose rejection.** After an Isaac Stop/Play, sim time restarts at 0, so a pose from before
+  the reset has a *negative* age and passed the old `age <= 5 s` check — the orchestrator re-picked
+  the cube's previous position. Now `0 <= age <= 5 s`.
+
+Decisions taken while writing it (2026-09-04), still valid:
 
 - **Sends the `MoveGroup` action directly, not `MoveGroupInterface`.** This install has no
   `moveit_py` bindings (`import moveit` fails; only `moveit_msgs` is present), so the Python
@@ -260,8 +292,8 @@ Decisions taken while writing it, each non-obvious:
   over the cube it occludes the tag, and once grasped the cube's pose is defined by the gripper, not
   by vision. The sequence checks one pose for freshness (`cube_pose_max_age_sec`, 5 s) and commits.
   M5 is where a live pose stream starts to matter.
-- **Conservative defaults for a first run:** velocity and acceleration scaling at 0.1, approach and
-  lift heights 0.15 m, and a `max_reach` 0.850 m preflight check (the cube is at 0.745 m).
+- **Approach and lift heights 0.15 m**, and a `max_reach` 0.850 m preflight check before any pose
+  goal is sent.
 - A `~/pick_once` `std_srvs/Trigger` service fires the sequence on demand, which is how
   `pick_demo.launch.py` drives it with `auto_start:=false`.
 
@@ -270,6 +302,17 @@ live pose and picks an intercept point + arrival time; the orchestrator plans on
 predicted pose, timed to finish on arrival. A single MoveIt plan takes 50–200 ms+ — too slow to
 re-plan every frame — so **predict-and-intercept** is the standard approach, not continuous
 re-planning.
+
+> ⚠️ **Open design question (raised 2026-09-27), decide before building M5.** Arriving on time is
+> not enough: closing the gripper takes a fraction of a second, and unless the TCP is *moving with
+> the belt* during it, the cube slides against the fingers. The industrial pattern is **conveyor
+> tracking** — intercept above the cube (predicted, planned once), then match belt velocity while
+> descending, closing and lifting. That needs streaming velocity control (`moveit_servo`), so M6
+> becomes half of M5, and the trajectory-only `trajectory_bridge` would likely give way to
+> ros2_control (`topic_based_ros2_control` — availability on Jazzy unchecked). The simpler
+> alternative, also common in industry: **stop the belt** when the cube reaches the pick zone,
+> pick it statically (M4 as-is), restart. Also still open: `wrist_1` lagging 1.67 rad on one move
+> (cause unknown), and patchy detection at 4 px/cell — both matter once timing matters.
 
 > Belt velocity is **not** in `isaac_conveyor_spawner.py` (it only defines `SPAWN_POS`, `DESPAWN_Y`
 > and spawn timing) — cubes move via the conveyor prim's PhysX surface velocity on the USD stage.
@@ -296,9 +339,8 @@ re-confirmed 2026-09-12).
 **M3 was moved off the critical path** once measurement showed the naive version makes every grasp
 pose permanently in collision. M4 runs against an empty planning scene instead.
 
-Next up: **run M4** — the code exists and has never been executed. Everything upstream of it is
-verified, so a failure now points at the orchestrator, the frame convention, or `grasp_z_offset`,
-not at perception or the bridge.
+**M4 is verified (2026-09-27).** Next up: **choose M5's approach** (conveyor tracking vs
+stop-and-pick — see the M5 milestone), then build it.
 
 ## Perception approach (reference)
 
