@@ -63,6 +63,7 @@ from moveit_msgs.msg import (
     OrientationConstraint,
     PositionConstraint,
 )
+from moveit_msgs.srv import GetPositionIK
 import rclpy
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -108,6 +109,10 @@ class PickOrchestrator(Node):
 
         self.declare_parameter('group_name', 'ur_manipulator')
         self.declare_parameter('tcp_link', 'grasp_tcp')
+        # Distance from tcp_link to the fingertips along the approach axis.
+        # 0 for our URDF (grasp_tcp IS the fingertips); 0.11181 when planning
+        # with NVIDIA's bare-arm model, whose tool frame is tool0.
+        self.declare_parameter('tcp_offset_z', 0.0)
         self.declare_parameter('base_frame', 'base_link')
 
         # --- grasp geometry ------------------------------------------------
@@ -145,6 +150,18 @@ class PickOrchestrator(Node):
         # sweep, for the long moves) or LIN (straight TCP line, for descend and
         # lift, which also can't flip to a different IK branch mid-move).
         self.declare_parameter('pipeline_id', 'pilz_industrial_motion_planner')
+        # The sequence asks for a 'PTP' (sweep) or 'LIN' (straight line) move;
+        # these name what the active pipeline calls each. cuMotion has one
+        # planner for both: pass 'cuMotion' to each.
+        self.declare_parameter('ptp_planner_id', 'PTP')
+        self.declare_parameter('lin_planner_id', 'LIN')
+        # Solve IK via move_group's /compute_ik -- seeded from the CURRENT arm
+        # state -- and send the result as a joint goal. cuMotion solves pose
+        # goals with its own many-seed IK and may pick a far branch: on
+        # 2026-10-10 "above bin" flipped the elbow (+1.68 -> -0.34 rad) and
+        # swung shoulder_lift 118 deg. Off for Pilz, whose IK already seeds
+        # from the current state.
+        self.declare_parameter('ik_then_joint_goal', False)
         self.declare_parameter('velocity_scaling', 0.3)
         self.declare_parameter('acceleration_scaling', 0.3)
         self.declare_parameter('planning_time', 5.0)
@@ -164,6 +181,7 @@ class PickOrchestrator(Node):
         g = self.get_parameter
         self.group_name = g('group_name').value
         self.tcp_link = g('tcp_link').value
+        self.tcp_offset_z = float(g('tcp_offset_z').value)
         self.base_frame = g('base_frame').value
         self.grasp_z_offset = float(g('grasp_z_offset').value)
         self.approach_height = float(g('approach_height').value)
@@ -175,6 +193,9 @@ class PickOrchestrator(Node):
         self.gripper_closed = float(g('gripper_closed').value)
         self.gripper_settle = float(g('gripper_settle_sec').value)
         self.pipeline_id = g('pipeline_id').value
+        self.planner_ids = {'PTP': g('ptp_planner_id').value,
+                            'LIN': g('lin_planner_id').value}
+        self.ik_then_joint_goal = bool(g('ik_then_joint_goal').value)
         self.vel_scale = float(g('velocity_scaling').value)
         self.acc_scale = float(g('acceleration_scaling').value)
         self.planning_time = float(g('planning_time').value)
@@ -191,6 +212,8 @@ class PickOrchestrator(Node):
         cb = ReentrantCallbackGroup()
         self._move = ActionClient(self, MoveGroup, '/move_action',
                                   callback_group=cb)
+        self._ik = self.create_client(GetPositionIK, '/compute_ik',
+                                      callback_group=cb)
         self._gripper_pub = self.create_publisher(
             JointState, g('command_topic').value, 10)
         self.create_subscription(
@@ -261,7 +284,7 @@ class PickOrchestrator(Node):
         req = goal.request
         req.group_name = self.group_name
         req.pipeline_id = self.pipeline_id
-        req.planner_id = planner_id
+        req.planner_id = self.planner_ids.get(planner_id, planner_id)
         req.num_planning_attempts = self.planning_attempts
         req.allowed_planning_time = self.planning_time
         req.max_velocity_scaling_factor = self.vel_scale
@@ -377,10 +400,56 @@ class PickOrchestrator(Node):
     def move_to_pose(self, xyz, yaw, label, planner_id='PTP'):
         if not self._check_reach(xyz, label):
             return False
+        # grasp_quaternion always points the tool straight down, so the
+        # fingertips sitting tcp_offset_z past tcp_link means tcp_link must
+        # be that much HIGHER in base_link.
+        tcp_xyz = (xyz[0], xyz[1], xyz[2] + self.tcp_offset_z)
+        quat = grasp_quaternion(yaw)
         goal = self._base_goal(planner_id)
-        goal.request.goal_constraints = [
-            self._pose_constraints(xyz, grasp_quaternion(yaw))]
+        if self.ik_then_joint_goal:
+            joints = self._solve_ik(tcp_xyz, quat, label)
+            if joints is None:
+                return False
+            goal.request.goal_constraints = [self._joint_constraints(joints)]
+        else:
+            goal.request.goal_constraints = [
+                self._pose_constraints(tcp_xyz, quat)]
         return self._send(goal, f'{label} [{planner_id}]')
+
+    def _solve_ik(self, xyz, quat, label):
+        """Joint angles for tcp_link at (xyz, quat), nearest the current state.
+
+        move_group's /compute_ik starts from its current robot state and
+        applies ik_request.robot_state as a diff -- an empty diff therefore
+        seeds the solver from where the arm is now. Blocking call: only ever
+        run from the sequence's worker thread, like _send().
+        """
+        if not self._ik.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error(f'{label}: /compute_ik not available')
+            return None
+        req = GetPositionIK.Request()
+        r = req.ik_request
+        r.group_name = self.group_name
+        r.ik_link_name = self.tcp_link
+        r.robot_state.is_diff = True
+        r.avoid_collisions = True
+        r.timeout.sec = 1
+        r.pose_stamped.header.frame_id = self.base_frame
+        p = r.pose_stamped.pose
+        p.position.x, p.position.y, p.position.z = xyz
+        p.orientation.x, p.orientation.y, p.orientation.z, \
+            p.orientation.w = quat
+        res = self._ik.call(req)
+        if res is None or res.error_code.val != MOVEIT_SUCCESS:
+            code = None if res is None else res.error_code.val
+            self.get_logger().error(
+                f'{label}: no IK solution near the current state '
+                f'(MoveItErrorCode {code}). Not falling back to a pose goal, '
+                'which could flip to a far branch.')
+            return None
+        sol = dict(zip(res.solution.joint_state.name,
+                       res.solution.joint_state.position))
+        return [sol[j] for j in ARM_JOINTS]
 
     def move_home(self):
         goal = self._base_goal('PTP')

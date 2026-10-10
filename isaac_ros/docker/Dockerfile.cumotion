@@ -1,0 +1,37 @@
+# cuMotion + MoveIt layer for the UR5e + Robotiq 2F-85 (isaacsim_ros_ws).
+# Built by: isaac-ros activate --build-local
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG DEBIAN_FRONTEND=noninteractive
+ENV ROS_DISTRO=jazzy
+ENV ROS_ROOT=/opt/ros/${ROS_DISTRO}
+
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    apt-get update && apt-get install -y \
+      ros-jazzy-isaac-ros-cumotion-moveit \
+      ros-jazzy-isaac-ros-cumotion-robot-description \
+      ros-jazzy-isaac-ros-cumotion-examples \
+      ros-jazzy-moveit \
+      ros-jazzy-ur-description \
+      ros-jazzy-ur-moveit-config \
+      ros-jazzy-robotiq-description \
+      ros-jazzy-xacro \
+      ros-jazzy-topic-based-ros2-control
+
+# topic_based_ros2_control, recompiled here OVER the apt copy above (same
+# install paths, so this one wins; the apt line is kept only so Docker reuses
+# the cached install layer).
+# NVIDIA's prebuilt 99.99.1 was built against an older hardware_interface and
+# segfaults in HardwareComponent::initialize() against Jazzy's 4.48.1 (ABI
+# mismatch, gdb-confirmed 2026-10-10). Same upstream package, pinned to the
+# commit verified to initialize cleanly; installed into /opt/ros/jazzy so no
+# extra overlay needs sourcing.
+ARG TBR_COMMIT=aa9f9ef9525a60f8becea322537dd1d6d1bf9123
+RUN . /opt/ros/jazzy/setup.sh && \
+    git clone https://github.com/PickNikRobotics/topic_based_ros2_control.git /tmp/tbr && \
+    cd /tmp/tbr && git checkout ${TBR_COMMIT} && \
+    cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
+          -DCMAKE_INSTALL_PREFIX=/opt/ros/jazzy && \
+    cmake --build build -j"$(nproc)" && cmake --install build && \
+    rm -rf /tmp/tbr

@@ -142,6 +142,32 @@ first, then settled decisions, then resolved issues kept because the *reason* is
   **must be understood before M5**, where arriving late is failing. Diagnostic tool: the per-joint
   error recorder that subscribes to the bridge's action feedback
   (`/scaled_joint_trajectory_controller/follow_joint_trajectory/_action/feedback`).
+  **2026-10-10:** reproduced on the Pilz/bridge path (`~/bags/jitter_run1..3`): `wrist_1` is pushed
+  the *wrong way* by ~1 rad during the two big PTPs while pan/lift/elbow move, then snaps back at
+  ~3 rad/s — the visible "jitter". Ruled out: torque cap (Max Force 28 → 150, now saved in the
+  stage, helped only partly), collision (colliders watched, nothing touched), passive inertia (wrist
+  world pitch swings rather than holding). **Not seen on the cuMotion path** (`cumotion_pick2`:
+  `wrist_1` max error 0.031 rad) — cause still unknown; which change cured it (Max Force, JTC spline
+  interpolation, or cuMotion's paths) was not isolated.
+
+- **cuMotion's "LIN" moves are not straight — likely cause of occasional missed grasps (2026-10-10).**
+  cuMotion plans in joint space and has no Cartesian-line mode, so `pick_cumotion.launch.py` maps
+  `LIN` to `cuMotion`. Measured on a *successful* pick (`~/bags/cumotion_pick3`): the fingertips
+  wander up to 10.6 mm sideways during the last 13 cm of descent (9.8 mm at cube level), against
+  ~17.5 mm per-finger clearance (85 mm stroke, 50 mm cube; 71 mm across a corner). One unrecorded
+  run pushed and rotated the cube instead of grasping it. **Fix, not yet built:** for descend /
+  lift / lower / retreat, call `/compute_cartesian_path` and run the result with
+  `/execute_trajectory` (both verified available in NVIDIA's `move_group`); fail the step if the
+  path is under 100% complete. Check: descent deviation ≲ 1 mm in a recorded run.
+
+- **Bins are the wrong way round for the robot (2026-10-10).** Roles: `RecollectionBin` = collection
+  (Good), `Sorting_Bin_1` = waste (Bad). `place_xyz` targets `Sorting_Bin_1` (on the block beside the
+  robot); `RecollectionBin`'s origin is ~2.7 m from the base, on the floor — out of reach. Swap their
+  positions in the stage (or rename) before M6.
+
+- **`ros2 bag record` silently skips hidden topics even when named explicitly** — e.g. an action's
+  `…/_action/feedback`. Record `/isaac_joint_commands` + `/isaac_joint_states` instead; they carry
+  the same target-vs-actual information.
 
 - **`timeout N ros2 topic hz|echo … | grep` prints nothing even when the topic is live.** Python
   block-buffers stdout into a pipe, and `timeout` kills it before the buffer is flushed — so an
@@ -149,6 +175,27 @@ first, then settled decisions, then resolved issues kept because the *reason* is
   2026-09-27. Use `PYTHONUNBUFFERED=1`, `--once` (exits cleanly), or redirect to a file.
 
 ## Settled decisions and config notes
+
+- **cuMotion stack = NVIDIA's `ur_isaac_sim.launch.py` with two fixes (2026-10-10).** Both are
+  defects in NVIDIA's Isaac ROS 4.6 release, not in our setup:
+  1. **Prebuilt `ros-jazzy-topic-based-ros2-control` (99.99.1) segfaults** in
+     `HardwareComponent::initialize()` → `get_lifecycle_id()` against Jazzy's ros2_control 4.48.1
+     (gdb-confirmed): it was compiled against an older `hardware_interface` (ABI mismatch; its
+     package declares no version bound, so apt can't tell). `isaac_ros/docker/Dockerfile.cumotion`
+     recompiles upstream at commit `aa9f9ef` over the apt copy.
+  2. **The example hard-codes `ur10e.xrdf`** whatever `ur_type` is passed. UR10e collision spheres on
+     a UR5e make most start states "collide" → `INVALID_INITIAL_CSPACE_POSITION` (17/18 plans
+     failed). Our copy (`isaac_ros/launch/ur_isaac_sim.launch.py`) uses `{ur_type}.xrdf`.
+- **Pose goals to cuMotion can flip the elbow; send joint goals instead (2026-10-10).** cuMotion
+  solves pose goals with its own many-seed IK and picks any branch: "above bin" went elbow
+  +1.68 → −0.34 rad and swung `shoulder_lift` 118°. `ik_then_joint_goal` makes the orchestrator get
+  IK from `/compute_ik` (seeded from the current state) and send a joint goal — what RViz does.
+  Caveat: KDL falls back to random restarts, so seeded ≠ guaranteed nearest — seeded from *home*,
+  the bin pose came back on a far branch; from the real (post-lift) state it was consistent 5/5.
+- **Isaac joint topics are now `/isaac_joint_states` / `/isaac_joint_commands`** (NVIDIA's names, set
+  in the stage's Action Graph 2026-10-10). The old Pilz path (`pick_demo.launch.py`,
+  `trajectory_bridge`) expects `/joint_states` / `/joint_command` and will not work unless they are
+  renamed back.
 
 - **Execution speed is set per request, not in config.** `ur_moveit_config`'s `joint_limits.yaml`
   defines *no* scaling factors, so RViz's 0.1 comes from its Motion Planning panel's own defaults
