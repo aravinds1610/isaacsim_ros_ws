@@ -2,7 +2,7 @@
 """Bring up MoveIt2 (move_group + RViz) for the Isaac Sim UR5e.
 
 Replaces ur_moveit_config's own ur_moveit.launch.py, which can't be used here
-for two reasons (see docs/EXPLAINED.md §3):
+for two reasons (see README.md):
 
 1. It launches ur_robot_driver's ``wait_for_robot_description`` and gates
    move_group/RViz behind that node's exit. ur_robot_driver isn't installed —

@@ -24,7 +24,7 @@
 
   <!-- Third-party python. NOTE ikpy (kinematics.py) is deliberately absent:
        it has no rosdep key, so declaring it would break `rosdep install`.
-       Install it with pip - see docs/ISSUES.md. -->
+       Install it user-local with pip (user, no-deps; break-system-packages on 24.04). -->
   <depend>python3-numpy</depend>
   <depend>python3-opencv</depend>        <!-- apriltag_pose: cv2 -->
 

@@ -8,3 +8,6 @@ __pycache__/
 gripper_measure.txt
 joints_dump.txt
 scene_measure.txt
+
+# Personal notes, kept locally only (history: git log -- docs)
+docs/

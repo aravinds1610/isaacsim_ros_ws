@@ -16,7 +16,7 @@ Measure it with ``scripts/isaac_camera_extrinsic.py``, which already folds in
 the USD-camera -> ROS-optical 180-degree flip.
 
 Two deliberate departures from "just use what the detector says", both measured
-on 2026-08-11 (see docs/PLAN.md):
+on 2026-08-11 (see README.md):
 
 * **Depth comes from known geometry, not vision** -- applied by sliding along
   the camera ray, not by overwriting Z. A monocular camera infers depth purely

@@ -17,12 +17,15 @@ absolute metres. Both live in the cube's object space, so any scale on the cube
 Prints ``tag_size_m`` at the end. That is the number AprilTagDetector wants —
 the BLACK square's edge, which is *not* the quad edge. See QUIET_RATIO.
 """
+import os
+
 import omni.usd
 from pxr import Usd, UsdGeom, UsdShade, Sdf
 
 # ============================== CONFIG ==============================
 CUBE_PATH     = "/World/Cube"   # exact path — copy it from the Stage panel
-TAG_PNG       = "/home/aravindsuresh16/isaacsim_ros_ws/apriltags/apriltag_36h11_id0.png"
+TAG_PNG       = os.path.expanduser(
+    "~/isaacsim_ros_ws/apriltags/apriltag_36h11_id0.png")
 QUAD_FRACTION = 0.96            # quad edge as a fraction of the cube edge
 LIFT_FRACTION = 0.02            # lift above the face, same fractional units
 # ====================================================================
@@ -73,7 +76,13 @@ st.CreateIdAttr("UsdPrimvarReader_float2")
 st.CreateInput("varname", Sdf.ValueTypeNames.Token).Set("st")
 tex = UsdShade.Shader.Define(stage, mat_path + "/Tex")
 tex.CreateIdAttr("UsdUVTexture")
-tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(TAG_PNG)
+# Authored RELATIVE to the stage file when it is saved on disk, so the stage
+# still finds the texture under another user or clone location. An absolute
+# path here is what broke portability before (2026-10-11).
+root_file = stage.GetRootLayer().realPath
+tag_asset = (os.path.relpath(TAG_PNG, os.path.dirname(root_file))
+             if root_file else TAG_PNG)
+tex.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(tag_asset)
 tex.CreateInput("sourceColorSpace", Sdf.ValueTypeNames.Token).Set("sRGB")
 tex.CreateInput("st", Sdf.ValueTypeNames.Float2).ConnectToSource(
     st.ConnectableAPI(), "result")

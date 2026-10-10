@@ -70,7 +70,7 @@ def generate_launch_description():
 
     # /rgb + /camera_info -> /cube_pose in base_link. All the scene-dependent
     # numbers (extrinsic, tag_size, tag_z_base) are node parameters with
-    # defaults measured 2026-08-11 — see docs/PLAN.md's scene reference table.
+    # defaults measured 2026-08-11 — see README.md.
     # Override them here if the scene moves, rather than editing the node.
     cube_pose_publisher = Node(
         package='ur5e_isaac_control',
